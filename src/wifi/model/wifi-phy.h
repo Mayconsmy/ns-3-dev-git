@@ -33,11 +33,11 @@
     {                                                                                              \
         if (DynamicCast<const WifiPhy>(phy))                                                       \
         {                                                                                          \
-            std::clog << "[index=" << +phy->GetPhyId() << "][channel="                             \
-                      << (phy->GetOperatingChannel().IsSet()                                       \
-                              ? std::to_string(+phy->GetOperatingChannel().GetNumber())            \
-                              : "UNKNOWN")                                                         \
-                      << "][band=" << phy->GetPhyBand() << "] ";                                   \
+            ns3LogStream << "[index=" << +phy->GetPhyId() << "][channel="                          \
+                         << (phy->GetOperatingChannel().IsSet()                                    \
+                                 ? std::to_string(+phy->GetOperatingChannel().GetNumber())         \
+                                 : "UNKNOWN")                                                      \
+                         << "][band=" << phy->GetPhyBand() << "] ";                                \
         }                                                                                          \
     }
 
@@ -1708,7 +1708,7 @@ class WIFI_EXPORT WifiPhy : public Object
  * @param rxSignalInfo received signal info to stringify
  * @return output stream
  */
-std::ostream& operator<<(std::ostream& os, RxSignalInfo rxSignalInfo);
+WIFI_EXPORT std::ostream& operator<<(std::ostream& os, RxSignalInfo rxSignalInfo);
 
 } // namespace ns3
 

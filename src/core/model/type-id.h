@@ -337,7 +337,7 @@ class TypeId
     /**
      * Set the parent TypeId.
      *
-     * @tparam T \explicit The parent TypeID type.
+     * @tparam T @explicit The parent TypeID type.
      * @return This TypeId instance.
      *
      * Record in this TypeId which TypeId is the TypeId
@@ -380,7 +380,7 @@ class TypeId
      * Record in this TypeId the fact that the default constructor
      * is accessible.
      *
-     * @tparam T \explicit The class name represented by this TypeId.
+     * @tparam T @explicit The class name represented by this TypeId.
      * @returns This TypeId instance
      */
     template <typename T>
@@ -424,6 +424,23 @@ class TypeId
      * @returns \c true if the call was successfully.
      */
     bool SetAttributeInitialValue(std::size_t i, Ptr<const AttributeValue> initialValue);
+
+    /**
+     * Set the initial value of an Attribute identified by name.
+     *
+     * The attribute is resolved through this TypeId's inheritance chain, so an
+     * attribute declared on a parent TypeId can be set through a derived
+     * TypeId. The initial value is recorded on the TypeId that actually
+     * declares the attribute, which is where ObjectBase::ConstructSelf reads it
+     * back when constructing a derived instance.
+     *
+     * @param [in] name The name of the attribute to manipulate.
+     * @param [in] initialValue The new initial value to use for this attribute.
+     * @returns \c true if the attribute was found and set.
+     *
+     * @see @issueid{147}
+     */
+    bool SetAttributeInitialValue(std::string name, Ptr<const AttributeValue> initialValue);
 
     /**
      * Record in this TypeId the fact that a new attribute exists.

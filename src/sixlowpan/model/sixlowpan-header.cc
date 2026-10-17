@@ -68,7 +68,19 @@ SixLowPanDispatch::GetDispatchType(uint8_t dispatch)
 SixLowPanDispatch::NhcDispatch_e
 SixLowPanDispatch::GetNhcDispatchType(uint8_t dispatch)
 {
-    if ((dispatch >= LOWPAN_NHC) && (dispatch <= LOWPAN_NHC_N))
+    if ((dispatch >= LOWPAN_GHC_EXT) && (dispatch <= LOWPAN_GHC_EXT_N))
+    {
+        return LOWPAN_GHC_EXT;
+    }
+    else if (dispatch == LOWPAN_GHC_ICMPV6)
+    {
+        return LOWPAN_GHC_ICMPV6;
+    }
+    else if ((dispatch >= LOWPAN_GHC_UDP) && (dispatch <= LOWPAN_GHC_UDP_N))
+    {
+        return LOWPAN_GHC_UDP;
+    }
+    else if ((dispatch >= LOWPAN_NHC) && (dispatch <= LOWPAN_NHC_N))
     {
         return LOWPAN_NHC;
     }
@@ -1104,7 +1116,15 @@ SixLowPanIphc::Serialize(Buffer::Iterator start) const
         switch (GetDam())
         {
         case HC_INLINE:
-            i.Write(m_dstInlinePart, 16);
+            // Stateful (DAC=1) multicast is the 48-bit form (RFC 6282, Section 3.1.1).
+            if (!GetDac())
+            {
+                i.Write(m_dstInlinePart, 16);
+            }
+            else
+            {
+                i.Write(m_dstInlinePart, 6);
+            }
             break;
         case HC_COMPR_64:
             i.Write(m_dstInlinePart, 6);
@@ -1238,7 +1258,15 @@ SixLowPanIphc::Deserialize(Buffer::Iterator start)
         switch (GetDam())
         {
         case HC_INLINE:
-            i.Read(m_dstInlinePart, 16);
+            // Stateful (DAC=1) multicast is the 48-bit form (RFC 6282, Section 3.1.1).
+            if (!GetDac())
+            {
+                i.Read(m_dstInlinePart, 16);
+            }
+            else
+            {
+                i.Read(m_dstInlinePart, 6);
+            }
             break;
         case HC_COMPR_64:
             i.Read(m_dstInlinePart, 6);
@@ -2103,6 +2131,7 @@ SixLowPanMesh::Deserialize(Buffer::Iterator start)
         addrSize = 8;
     }
     i.Read(buffer, addrSize);
+    m_src.SetType("MacAddress", addrSize);
     m_src.CopyFrom(buffer, addrSize);
 
     if (m_f)
@@ -2114,6 +2143,7 @@ SixLowPanMesh::Deserialize(Buffer::Iterator start)
         addrSize = 8;
     }
     i.Read(buffer, addrSize);
+    m_dst.SetType("MacAddress", addrSize);
     m_dst.CopyFrom(buffer, addrSize);
 
     return GetSerializedSize();

@@ -97,7 +97,7 @@ class CORE_EXPORT Time
     /**
      * The unit to use to interpret a number representing time
      */
-    enum Unit
+    enum Unit : int
     {
         Y = 0,     //!< year, 365 days
         D = 1,     //!< day, 24 hours
@@ -580,7 +580,15 @@ class CORE_EXPORT Time
         int64_t v = m_data;
         if (info->toMul)
         {
-            v *= info->factor;
+            // Perform the multiplication in unsigned arithmetic to avoid signed
+            // integer overflow (undefined behavior) when the converted value does
+            // not fit in int64_t. The wraparound result matches both the previous
+            // behavior on two's-complement platforms and the FromInteger() path,
+            // which already multiplies in unsigned arithmetic.
+            // If there is no overflow, static_cast<int64_t> recovers the correct
+            // signed result via two's-complement bit reinterpretation.
+            v = static_cast<int64_t>(static_cast<uint64_t>(v) *
+                                     static_cast<uint64_t>(info->factor));
         }
         else
         {
@@ -764,10 +772,20 @@ class CORE_EXPORT Time
      *  The inline Time ctors need to check if g_markingTimes is allocated
      *  before calling Mark(). Likewise, the dtor also needs to check before
      *  calling Clear(). On Windows, attempting to access g_markingTimes
-     *  directly from outside the compilation unit is an access violation so
-     *  this method is provided to work around that limitation.
+     *  directly from outside the compilation unit is an access violation, so
+     *  on that platform we fall back to a non-inline function call. On other
+     *  platforms (Linux, macOS, BSD, ...) the static is directly accessible,
+     *  so the check is inlined, since it fires on every Time construction,
+     *  copy, move and destruction.
      */
+#ifdef _WIN32
     static bool MarkingTimes();
+#else
+    static bool MarkingTimes() noexcept
+    {
+        return g_markingTimes != nullptr;
+    }
+#endif
 
   public:
     /**
@@ -786,6 +804,28 @@ class CORE_EXPORT Time
      */
     constexpr std::strong_ordering operator<=>(const Time& other) const = default;
 
+#ifdef NS_MSVC
+    /**
+     * Equality operator. Normally redundant when operator<=> is defaulted, so do
+     * not delete it as such: it is intentional. Declaring operator== ourselves
+     * (instead of letting the defaulted operator<=> synthesize it) prevents MSVC
+     * 18 (2026) from treating Time as trivially equality-comparable. That trait
+     * would otherwise lead the MSVC STL to select its vectorized std::find path
+     * (e.g. in wifi), which fails to compile because Time is not trivially
+     * copyable.
+     *
+     * The guard is deliberately the broad NS_MSVC rather than a version check:
+     * the operator is semantically identical to the defaulted one, so emitting
+     * it on every MSVC build is harmless.
+     *
+     * @param other Time to compare to this one
+     * @returns \c true if both Time instances have the same number of ticks.
+     */
+    constexpr bool operator==(const Time& other) const
+    {
+        return m_data == other.m_data;
+    }
+#endif
   private:
     /**
      * @cond HIDE_FROM_DOXYGEN

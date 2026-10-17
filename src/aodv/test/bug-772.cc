@@ -19,8 +19,6 @@
 #include "ns3/ipv4-address-helper.h"
 #include "ns3/mobility-helper.h"
 #include "ns3/mobility-model.h"
-#include "ns3/pcap-file.h"
-#include "ns3/pcap-test.h"
 #include "ns3/random-variable-stream.h"
 #include "ns3/rng-seed-manager.h"
 #include "ns3/simulator.h"
@@ -80,7 +78,7 @@ void
 Bug772ChainTest::DoRun()
 {
     RngSeedManager::SetSeed(1);
-    RngSeedManager::SetRun(2);
+    RngSeedManager::SetRun(1);
 
     // Default of 3 will cause packet loss
     Config::SetDefault("ns3::ArpCache::PendingQueueSize", UintegerValue(10));
@@ -156,8 +154,7 @@ Bug772ChainTest::CreateDevices()
     streamsUsed = WifiHelper::AssignStreams(devices, streamNumber);
     totalStreamsUsed += streamsUsed;
     streamNumber += streamIncrement;
-    constexpr int expectedWifiStreamsPerDevice = 2;
-    // Assign 6 streams per device
+    constexpr int expectedWifiStreamsPerDevice = 4;
     NS_TEST_ASSERT_MSG_EQ(streamsUsed,
                           (devices.GetN() * expectedWifiStreamsPerDevice),
                           "Stream assignment mismatch");

@@ -1,4 +1,4 @@
-Checks: >
+Checks: |
   -*,
   bugprone-argument-comment,
   bugprone-bool-pointer-implicit-conversion,
@@ -59,4 +59,5 @@ ExtraArgsBefore:
   - -Wno-unknown-warning-option
 
 FormatStyle: "file"
-UseColor: true
+HeaderFilterRegex: "(contrib|examples|scratch|src|utils)/.*\\.h$"
+ExcludeHeaderFilterRegex: "(third-party|eigen[0-9]*)/.*"

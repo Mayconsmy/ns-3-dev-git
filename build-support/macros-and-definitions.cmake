@@ -15,10 +15,20 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/build-support/3rd-party")
 
 macro(disable_cmake_warnings)
   set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE BOOL "" FORCE)
+  # Starting with CMake 4.4, --warn-uninitialized warnings are no longer
+  # suppressed by CMAKE_SUPPRESS_DEVELOPER_WARNINGS. Macros get their own
+  # diagnostic stack entry, so cmake_diagnostic(PUSH/POP) cannot span them.
+  if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "4.4.0")
+    cmake_diagnostic(GET CMD_UNINITIALIZED ns3_uninitialized_diagnostic)
+    cmake_diagnostic(SET CMD_UNINITIALIZED IGNORE)
+  endif()
 endmacro()
 
 macro(enable_cmake_warnings)
   set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 0 CACHE BOOL "" FORCE)
+  if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "4.4.0")
+    cmake_diagnostic(SET CMD_UNINITIALIZED ${ns3_uninitialized_diagnostic})
+  endif()
 endmacro()
 
 # Set options that are not really meant to be changed
@@ -182,8 +192,6 @@ macro(process_options)
     set(ENABLE_TESTS ON)
     # CTest creates a TEST target that conflicts with ns-3 test library
     # enable_testing()
-  else()
-    list(REMOVE_ITEM libs_to_build test)
   endif()
 
   set(profiles_without_suffixes release)
@@ -258,8 +266,14 @@ macro(process_options)
 
   if(${NS3_CLANG_TIDY} OR ${NS3_CLANG_TIDY_FIX})
     find_program(
-      CLANG_TIDY NAMES clang-tidy-21 clang-tidy-20 clang-tidy-19 clang-tidy-18
-                       clang-tidy-17 clang-tidy
+      CLANG_TIDY
+      NAMES clang-tidy-22
+            clang-tidy-21
+            clang-tidy-20
+            clang-tidy-19
+            clang-tidy-18
+            clang-tidy-17
+            clang-tidy
     )
     if("${CLANG_TIDY}" STREQUAL "CLANG_TIDY-NOTFOUND")
       message(FATAL_ERROR "Clang-tidy was not found")
@@ -451,7 +465,13 @@ macro(process_options)
     endif()
   endif()
 
-  if(${NS3_NATIVE_OPTIMIZATIONS} AND ${GCC})
+  if(${NS3_NATIVE_OPTIMIZATIONS} AND (${GCC} OR ${CLANG}))
+    # -march=native / -mtune=native work for GCC, Clang on Linux/macOS, and
+    # ClangCL on Windows. ClangCL accepts the flag directly (it is a clang
+    # driver flag, not an MSVC /arch: flag) and enables AVX2/FMA/etc. just as it
+    # does on Linux. Previously only GCC was listed here, so ClangCL builds
+    # never got native CPU features, contributing to the large runtime gap
+    # between ClangCL and MinGW.
     add_compile_options(-march=native -mtune=native)
   endif()
 
@@ -514,6 +534,27 @@ macro(process_options)
 
   # Set common include folder (./build/include, where we find ns3/core-module.h)
   include_directories(${CMAKE_OUTPUT_DIRECTORY}/include)
+
+  # Vendored third-party header-only libraries (e.g. nlohmann/json).
+  #
+  # Rather than placing the generic third-party/ directory on the global include
+  # path -- which would assume that every vendored library is header-only and
+  # follows the same <library>/header layout -- copy the specific vendored
+  # library into the build-tree include directory (build/include, already added
+  # to the include path above). Consumers then use the upstream include path,
+  # e.g. #include <nlohmann/json.hpp>. Re-run CMake after updating the vendored
+  # copy under third-party/nlohmann/ to refresh it.
+  file(COPY ${PROJECT_SOURCE_DIR}/third-party/nlohmann
+       DESTINATION ${CMAKE_OUTPUT_DIRECTORY}/include
+  )
+
+  # Install the vendored header alongside the ns-3 public headers. This keeps an
+  # installed ns-3 self-contained should the library ever be included from an
+  # installed ns-3 header (a public header that includes <nlohmann/json.hpp>
+  # would otherwise fail to compile for downstream users).
+  install(DIRECTORY ${CMAKE_OUTPUT_DIRECTORY}/include/nlohmann
+          DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
 
   # Include our package managers
   # cmake-format: off
@@ -579,11 +620,14 @@ macro(process_options)
     find_package(Eigen3 QUIET)
     enable_cmake_warnings()
 
-    if(${EIGEN3_FOUND})
+    if(${Eigen3_FOUND})
       set(ENABLE_EIGEN True)
       add_definitions(-DHAVE_EIGEN3)
       add_definitions(-DEIGEN_MPL2_ONLY)
       if(NOT ${NS3_FORCE_LOCAL_DEPENDENCIES})
+        get_target_property(
+          EIGEN3_INCLUDE_DIR Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES
+        )
         include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
       endif()
     else()
@@ -1297,6 +1341,15 @@ macro(process_options)
       # correctly
       # https://github.com/ccache/ccache/issues/539#issuecomment-664198545
       add_definitions(-Xclang -fno-pch-timestamp)
+      if(MSVC)
+        # ClangCL validates that the preprocessor macros used to build the
+        # shared stdlib PCH match those of each translation unit that reuses it.
+        # They intentionally differ by the per-module <module>_EXPORTS define
+        # (added by CMake to every shared-library object). The PCH only contains
+        # standard-library headers, which do not depend on that macro, so the
+        # mismatch is harmless; silence the otherwise -Werror diagnostic.
+        add_compile_options(-Wno-clang-cl-pch)
+      endif()
     endif()
     if(${XCODE})
       # XCode is weird and messes up with the PCH, requiring this flag

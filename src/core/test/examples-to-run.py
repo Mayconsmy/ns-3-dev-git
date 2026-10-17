@@ -14,7 +14,9 @@ cpp_examples = [
     ("main-random-variable", "True", "False"),
     ("sample-random-variable", "True", "True"),
     ("system-path-examples", "True", "True"),
+    ("templated-classes", "True", "True"),
     ("test-string-value-formatting", "True", "True"),
+    ('timespan-example "--tsAttr={100ms,200ms}" "--tsVar={300ms,400ms}"', "True", "True"),
 ]
 
 # A list of Python examples to run in order to ensure that they remain

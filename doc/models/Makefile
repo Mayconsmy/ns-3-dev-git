@@ -19,10 +19,12 @@ SOURCES = \
 	$(SRC)/antenna/doc/antenna.rst \
 	$(SRC)/aodv/doc/aodv.rst \
 	$(SRC)/applications/doc/applications.rst \
-        $(SRC)/applications/doc/rta-tig-mobile-gaming-traffic.inc \
-        $(SRC)/applications/doc/tgax-video-traffic.inc \
-        $(SRC)/applications/doc/tgax-virtual-desktop-traffic.inc \
-        $(SRC)/applications/doc/tgax-voip-traffic.inc \
+	$(SRC)/applications/doc/rta-tig-mobile-gaming-traffic.inc \
+	$(SRC)/applications/doc/tgax-video-traffic.inc \
+	$(SRC)/applications/doc/tgax-virtual-desktop-traffic.inc \
+	$(SRC)/applications/doc/tgax-voip-traffic.inc \
+	$(SRC)/applications/doc/three-gpp-http.rst \
+	$(SRC)/applications/doc/flent.rst \
 	$(SRC)/bridge/doc/bridge.rst \
 	$(SRC)/brite/doc/brite.rst \
 	$(SRC)/buildings/doc/source/buildings.rst \
@@ -69,6 +71,7 @@ SOURCES = \
 	$(SRC)/internet/doc/udp.rst \
 	$(SRC)/internet-apps/doc/internet-apps.rst \
 	$(SRC)/mobility/doc/mobility.rst \
+	$(SRC)/mobility/doc/orbital-mobility.rst \
 	$(SRC)/olsr/doc/olsr.rst \
 	$(SRC)/openflow/doc/openflow-switch.rst \
 	$(SRC)/point-to-point/doc/point-to-point.rst \
@@ -79,6 +82,7 @@ SOURCES = \
 	$(SRC)/wifi/doc/source/wifi-changelog.rst \
 	$(SRC)/wifi/doc/source/wifi-references.rst \
 	$(SRC)/uan/doc/uan.rst \
+	$(SRC)/virtual-net-device/doc/virtual-net-device.rst \
 	$(SRC)/topology-read/doc/topology.rst \
 	$(SRC)/traffic-control/doc/traffic-control-layer.rst \
 	$(SRC)/traffic-control/doc/queue-discs.rst \
@@ -118,6 +122,7 @@ SOURCEFIGS = \
 	$(SRC)/applications/doc/http-num-of-embedded-objects.png \
 	$(SRC)/applications/doc/http-parsing-time.png \
 	$(SRC)/applications/doc/http-reading-time.png \
+	$(SRC)/applications/doc/ns3-flent-rrul.png \
 	$(SRC)/dsr/doc/figures/dsrRreq.dia \
 	$(SRC)/dsr/doc/figures/dsrRrep.dia \
 	$(SRC)/network/doc/packet.dia \
@@ -390,6 +395,12 @@ SOURCEFIGS = \
 	$(SRC)/internet-apps/doc/figures/stateful-dhcpv6-format.dia \
 	$(SRC)/sixlowpan/doc/figures/sixlowpanndtopology.png \
 	$(SRC)/sixlowpan/doc/figures/sixlowpanndrouteovertopology.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-1.0s-inc-0.0deg-raan-0.0deg-planeRot-0.0deg.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-60.0s-inc-0.0deg-raan-0.0deg-planeRot-0.0deg.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-600.0s-inc-0.0deg-raan-0.0deg-planeRot-0.0deg.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-600.0s-inc-30.0deg-raan-0.0deg-planeRot-0.0deg.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-600.0s-inc-30.0deg-raan-180.0deg-planeRot-0.0deg.png \
+	$(SRC)/mobility/doc/figures/leo-orbit-res-600.0s-inc-30.0deg-raan-0.0deg-planeRot-60.0deg.png
 
 # specify figures from which .png and .pdf figures need to be
 # generated (all dia and eps figures)

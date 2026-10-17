@@ -16,8 +16,10 @@
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
+#include <iterator>
 #include <regex>
 #include <sstream>
+#include <system_error>
 #include <tuple>
 
 #ifdef __APPLE__
@@ -132,7 +134,7 @@ FindSelf()
 #if defined(__linux__)
     {
         ssize_t size = 1024;
-        char* buffer = (char*)malloc(size);
+        char* buffer = static_cast<char*>(malloc(size));
         memset(buffer, 0, size);
         int pathLength;
         while (true)
@@ -145,7 +147,7 @@ FindSelf()
             }
             size *= 2;
             free(buffer);
-            buffer = (char*)malloc(size);
+            buffer = static_cast<char*>(malloc(size));
             memset(buffer, 0, size);
         }
         if (pathLength == -1)
@@ -242,7 +244,7 @@ Split(std::string path)
 std::string
 Join(std::list<std::string>::const_iterator begin, std::list<std::string>::const_iterator end)
 {
-    NS_LOG_FUNCTION(*begin << *end);
+    NS_LOG_FUNCTION(std::distance(begin, end));
     std::string retval = "";
     for (auto i = begin; i != end; i++)
     {
@@ -343,44 +345,8 @@ bool
 Exists(const std::string path)
 {
     NS_LOG_FUNCTION(path);
-
-    bool err;
-    auto dirpath = Dirname(path);
-    std::list<std::string> files;
-    tie(files, err) = ReadFilesNoThrow(dirpath);
-    if (err)
-    {
-        // Directory doesn't exist
-        NS_LOG_LOGIC("directory doesn't exist: " << dirpath);
-        return false;
-    }
-    NS_LOG_LOGIC("directory exists: " << dirpath);
-
-    // Check if the file itself exists
-    auto tokens = Split(path);
-    const std::string& file = tokens.back();
-
-    if (file.empty())
-    {
-        // Last component was a directory, not a file name
-        // We already checked that the directory exists,
-        // so return true
-        NS_LOG_LOGIC("directory path exists: " << path);
-        return true;
-    }
-
-    files = ReadFiles(dirpath);
-
-    auto it = std::find(files.begin(), files.end(), file);
-    if (it == files.end())
-    {
-        // File itself doesn't exist
-        NS_LOG_LOGIC("file itself doesn't exist: " << file);
-        return false;
-    }
-
-    NS_LOG_LOGIC("file itself exists: " << file);
-    return true;
+    [[maybe_unused]] std::error_code ec;
+    return std::filesystem::exists(path, ec);
 }
 
 std::string

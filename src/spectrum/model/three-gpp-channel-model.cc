@@ -21,12 +21,17 @@
 #include "ns3/pointer.h"
 #include "ns3/shuffle.h"
 #include "ns3/simulator.h"
+#include "ns3/spatial-gaussian-field.h"
 #include "ns3/string.h"
+#include "ns3/uinteger.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <map>
 #include <random>
+#include <utility>
 
 namespace ns3
 {
@@ -36,6 +41,15 @@ NS_OBJECT_ENSURE_REGISTERED(ThreeGppChannelModel);
 
 /// Conversion factor: degrees to radians
 constexpr double DEG2RAD = M_PI / 180.0;
+
+/**
+ * LSP, cluster and ray random fields (TR 38.901 Sec. 7.6.3.1), see
+ * SpatialGaussianField. Irwin-Hall cells are used because a channel generation
+ * draws thousands of field samples of hundreds of cells each.
+ */
+const SpatialGaussianField kClusterField{SpatialGaussianField::Salt::CHANNEL_PARAMETERS,
+                                         SpatialGaussianField::CellGenerator::IrwinHall};
+
 /**
  * Maximum 2D displacement (in meters) allowed for a single channel-consistency update step.
  *
@@ -81,17 +95,18 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_RMa_LOS = {{
 /**
  * The square root matrix for <em>RMa NLOS</em>, which is generated using the
  * Cholesky decomposition according to table 7.5-6 Part 2 and follows the order
- * of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no K-factor).
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_RMa_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.5, 0.866025, 0, 0, 0, 0},
-    {0.6, -0.11547, 0.791623, 0, 0, 0},
-    {0, 0, 0, 1, 0, 0},
-    {-0.04, -0.138564, 0.540662, -0.18, 0.809003, 0},
-    {-0.25, -0.606218, -0.240013, 0.26, -0.231685, 0.625392},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_RMa_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.5, 0, 0.866025, 0, 0, 0, 0},
+    {0.6, 0, -0.11547, 0.791623, 0, 0, 0},
+    {0, 0, 0, 0, 1, 0, 0},
+    {-0.04, 0, -0.138564, 0.540662, -0.18, 0.809003, 0},
+    {-0.25, 0, -0.606218, -0.240013, 0.26, -0.231685, 0.625392},
 }};
 
 /**
@@ -102,13 +117,14 @@ static constexpr std::array<std::array<double, 6>, 6> sqrtC_RMa_NLOS = {{
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_RMa_O2I = {{
-    {1, 0, 0, 0, 0, 0},
-    {0, 1, 0, 0, 0, 0},
-    {0, 0, 1, 0, 0, 0},
-    {0, 0, -0.7, 0.714143, 0, 0},
-    {0, 0, 0.66, -0.123225, 0.741091, 0},
-    {0, 0, 0.47, 0.152631, -0.393194, 0.775373},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_RMa_O2I = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {0, 0, 1, 0, 0, 0, 0},
+    {0, 0, 0, 1, 0, 0, 0},
+    {0, 0, 0, -0.7, 0.714143, 0, 0},
+    {0, 0, 0, 0.66, -0.123225, 0.741091, 0},
+    {0, 0, 0, 0.47, 0.152631, -0.393194, 0.775373},
 }};
 
 /**
@@ -132,35 +148,37 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMa_LOS = {{
 /**
  * The square root matrix for <em>UMa NLOS</em>, which is generated using the
  * Cholesky decomposition according to table 7.5-6 Part 1 and follows the order
- * of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_UMa_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.4, 0.916515, 0, 0, 0, 0},
-    {-0.6, 0.174574, 0.78072, 0, 0, 0},
-    {0, 0.654654, 0.365963, 0.661438, 0, 0},
-    {0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
-    {-0.4, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMa_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.4, 0, 0.916515, 0, 0, 0, 0},
+    {-0.6, 0, 0.174574, 0.78072, 0, 0, 0},
+    {0, 0, 0.654654, 0.365963, 0.661438, 0, 0},
+    {0, 0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
+    {-0.4, 0, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
 }};
 
 /**
  * The square root matrix for <em>UMa O2I</em>, which is generated using the
  * Cholesky decomposition according to table 7.5-6 Part 1 and follows the order
- * of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_UMa_O2I = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.5, 0.866025, 0, 0, 0, 0},
-    {0.2, 0.57735, 0.791623, 0, 0, 0},
-    {0, 0.46188, -0.336861, 0.820482, 0, 0},
-    {0, -0.69282, 0.252646, 0.493742, 0.460857, 0},
-    {0, -0.23094, 0.16843, 0.808554, -0.220827, 0.464515},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMa_O2I = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.5, 0, 0.866025, 0, 0, 0, 0},
+    {0.2, 0, 0.57735, 0.791623, 0, 0, 0},
+    {0, 0, 0.46188, -0.336861, 0.820482, 0, 0},
+    {0, 0, -0.69282, 0.252646, 0.493742, 0.460857, 0},
+    {0, 0, -0.23094, 0.16843, 0.808554, -0.220827, 0.464515},
 }};
 
 /**
@@ -184,35 +202,37 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMi_LOS = {{
 /**
  * The square root matrix for <em>UMi NLOS</em>, which is generated using the
  * Cholesky decomposition according to table 7.5-6 Part 1 and follows the order
- * of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_UMi_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.7, 0.714143, 0, 0, 0, 0},
-    {0, 0, 1, 0, 0, 0},
-    {-0.4, 0.168034, 0, 0.90098, 0, 0},
-    {0, -0.70014, 0.5, 0.130577, 0.4927, 0},
-    {0, 0, 0.5, 0.221981, -0.566238, 0.616522},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMi_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.7, 0, 0.714143, 0, 0, 0, 0},
+    {0, 0, 0, 1, 0, 0, 0},
+    {-0.4, 0, 0.168034, 0, 0.90098, 0, 0},
+    {0, 0, -0.70014, 0.5, 0.130577, 0.4927, 0},
+    {0, 0, 0, 0.5, 0.221981, -0.566238, 0.616522},
 }};
 
 /**
  * The square root matrix for <em>UMi O2I</em>, which is generated using the
  * Cholesky decomposition according to table 7.5-6 Part 1 and follows the order
- * of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_UMi_O2I = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.5, 0.866025, 0, 0, 0, 0},
-    {0.2, 0.57735, 0.791623, 0, 0, 0},
-    {0, 0.46188, -0.336861, 0.820482, 0, 0},
-    {0, -0.69282, 0.252646, 0.493742, 0.460857, 0},
-    {0, -0.23094, 0.16843, 0.808554, -0.220827, 0.464515},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_UMi_O2I = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.5, 0, 0.866025, 0, 0, 0, 0},
+    {0.2, 0, 0.57735, 0.791623, 0, 0, 0},
+    {0, 0, 0.46188, -0.336861, 0.820482, 0, 0},
+    {0, 0, -0.69282, 0.252646, 0.493742, 0.460857, 0},
+    {0, 0, -0.23094, 0.16843, 0.808554, -0.220827, 0.464515},
 }};
 
 /**
@@ -236,18 +256,20 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_office_LOS = {{
 /**
  * The square root matrix for <em>Indoor-Office NLOS</em>, which is generated
  * using the Cholesky decomposition according to table 7.5-6 Part 2 and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_office_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.5, 0.866025, 0, 0, 0, 0},
-    {0, 0.46188, 0.886942, 0, 0, 0},
-    {-0.4, -0.23094, 0.120263, 0.878751, 0, 0},
-    {0, -0.311769, 0.55697, -0.249198, 0.728344, 0},
-    {0, -0.069282, 0.295397, 0.430696, 0.468462, 0.709214},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_office_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.5, 0, 0.866025, 0, 0, 0, 0},
+    {0, 0, 0.46188, 0.886942, 0, 0, 0},
+    {-0.4, 0, -0.23094, 0.120263, 0.878751, 0, 0},
+    {0, 0, -0.311769, 0.55697, -0.249198, 0.728344, 0},
+    {0, 0, -0.069282, 0.295397, 0.430696, 0.468462, 0.709214},
 }};
 
 /**
@@ -271,18 +293,20 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_DenseUrban_LOS =
 /**
  * The square root matrix for <em>NTN Dense Urban NLOS</em>, which is generated
  * using the Cholesky decomposition according to 3GPP TR 38.811 v15.4.0 table 6.7.2-2 and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_NTN_DenseUrban_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.4, 0.916515, 0, 0, 0, 0},
-    {-0.6, 0.174574, 0.78072, 0, 0, 0},
-    {0, 0.654654, 0.365963, 0.661438, 0, 0},
-    {0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
-    {-0.4, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_DenseUrban_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.4, 0, 0.916515, 0, 0, 0, 0},
+    {-0.6, 0, 0.174574, 0.78072, 0, 0, 0},
+    {0, 0, 0.654654, 0.365963, 0.661438, 0, 0},
+    {0, 0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
+    {-0.4, 0, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
 }};
 
 /**
@@ -306,94 +330,104 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_Urban_LOS = {{
 /**
  * The square root matrix for <em>NTN Urban NLOS</em>, which is generated
  * using the Cholesky decomposition according to 3GPP TR 38.811 v15.4.0 table 6.7.2-4 and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The square root matrix is dependent on the elevation angle, thus requiring a map.
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static const std::map<int, std::array<std::array<double, 6>, 6>> sqrtC_NTN_Urban_NLOS{
+static const std::map<int, std::array<std::array<double, 7>, 7>> sqrtC_NTN_Urban_NLOS{
     {10,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.21, 0.977701, 0, 0, 0, 0},
-         {-0.48, 0.459445, 0.747335, 0, 0, 0},
-         {-0.05, 0.377927, 0.28416, 0.879729, 0, 0},
-         {-0.02, 0.691213, 0.258017, 0.073265, 0.670734, 0},
-         {-0.31, -0.00521632, -0.115615, 0.0788023, 0.00218104, 0.940368},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.21, 0, 0.977701, 0, 0, 0, 0},
+         {-0.48, 0, 0.459445, 0.747335, 0, 0, 0},
+         {-0.05, 0, 0.377927, 0.28416, 0.879729, 0, 0},
+         {-0.02, 0, 0.691213, 0.258017, 0.073265, 0.670734, 0},
+         {-0.31, 0, -0.00521632, -0.115615, 0.0788023, 0.00218104, 0.940368},
      }}},
     {20,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.25, 0.968246, 0, 0, 0, 0},
-         {-0.52, 0.35115, 0.778648, 0, 0, 0},
-         {-0.04, 0.371806, 0.345008, 0.860889, 0, 0},
-         {0, 0.743613, 0.281102, 0.0424415, 0.605161, 0},
-         {-0.32, 0.0206559, -0.0689057, 0.154832, 0.061865, 0.929852},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.25, 0, 0.968246, 0, 0, 0, 0},
+         {-0.52, 0, 0.35115, 0.778648, 0, 0, 0},
+         {-0.04, 0, 0.371806, 0.345008, 0.860889, 0, 0},
+         {0, 0, 0.743613, 0.281102, 0.0424415, 0.605161, 0},
+         {-0.32, 0, 0.0206559, -0.0689057, 0.154832, 0.061865, 0.929852},
      }}},
     {30,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.21, 0.977701, 0, 0, 0, 0},
-         {-0.52, 0.450853, 0.725487, 0, 0, 0},
-         {-0.04, 0.288023, 0.260989, 0.920504, 0, 0},
-         {0.01, 0.697657, 0.386856, 0.0418183, 0.601472, 0},
-         {-0.33, 0.0416283, -0.0694268, 0.166137, 0.139937, 0.915075},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.21, 0, 0.977701, 0, 0, 0, 0},
+         {-0.52, 0, 0.450853, 0.725487, 0, 0, 0},
+         {-0.04, 0, 0.288023, 0.260989, 0.920504, 0, 0},
+         {0.01, 0, 0.697657, 0.386856, 0.0418183, 0.601472, 0},
+         {-0.33, 0, 0.0416283, -0.0694268, 0.166137, 0.139937, 0.915075},
      }}},
     {40,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.26, 0.965609, 0, 0, 0, 0},
-         {-0.53, 0.395813, 0.749955, 0, 0, 0},
-         {-0.04, 0.299914, 0.320139, 0.897754, 0, 0},
-         {0.01, 0.696556, 0.372815, 0.0580784, 0.610202, 0},
-         {-0.33, 0.0457742, -0.0173584, 0.154417, 0.129332, 0.920941},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.26, 0, 0.965609, 0, 0, 0, 0},
+         {-0.53, 0, 0.395813, 0.749955, 0, 0, 0},
+         {-0.04, 0, 0.299914, 0.320139, 0.897754, 0, 0},
+         {0.01, 0, 0.696556, 0.372815, 0.0580784, 0.610202, 0},
+         {-0.33, 0, 0.0457742, -0.0173584, 0.154417, 0.129332, 0.920941},
      }}},
     {50,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.25, 0.968246, 0, 0, 0, 0},
-         {-0.57, 0.420864, 0.705672, 0, 0, 0},
-         {-0.03, 0.229797, 0.235501, 0.943839, 0, 0},
-         {0.03, 0.679063, 0.384466, 0.0681379, 0.6209, 0},
-         {-0.41, -0.147173, -0.229228, 0.270707, 0.293002, 0.773668},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.25, 0, 0.968246, 0, 0, 0, 0},
+         {-0.57, 0, 0.420864, 0.705672, 0, 0, 0},
+         {-0.03, 0, 0.229797, 0.235501, 0.943839, 0, 0},
+         {0.03, 0, 0.679063, 0.384466, 0.0681379, 0.6209, 0},
+         {-0.41, 0, -0.147173, -0.229228, 0.270707, 0.293002, 0.773668},
      }}},
     {60,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.2, 0.979796, 0, 0, 0, 0},
-         {-0.53, 0.473568, 0.703444, 0, 0, 0},
-         {-0.05, 0.204124, 0.109225, 0.971547, 0, 0},
-         {0.03, 0.68994, 0.411073, 0.0676935, 0.591202, 0},
-         {-0.4, -0.224537, -0.292371, 0.275609, 0.301835, 0.732828},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.2, 0, 0.979796, 0, 0, 0, 0},
+         {-0.53, 0, 0.473568, 0.703444, 0, 0, 0},
+         {-0.05, 0, 0.204124, 0.109225, 0.971547, 0, 0},
+         {0.03, 0, 0.68994, 0.411073, 0.0676935, 0.591202, 0},
+         {-0.4, 0, -0.224537, -0.292371, 0.275609, 0.301835, 0.732828},
      }}},
     {70,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.19, 0.981784, 0, 0, 0, 0},
-         {-0.5, 0.524555, 0.689088, 0, 0, 0},
-         {-0.03, 0.228462, 0.18163, 0.955989, 0, 0},
-         {-0.02, 0.637818, 0.428725, 0.00608114, 0.639489, 0},
-         {-0.36, -0.18171, -0.282523, 0.106726, 0.123808, 0.854894},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.19, 0, 0.981784, 0, 0, 0, 0},
+         {-0.5, 0, 0.524555, 0.689088, 0, 0, 0},
+         {-0.03, 0, 0.228462, 0.18163, 0.955989, 0, 0},
+         {-0.02, 0, 0.637818, 0.428725, 0.00608114, 0.639489, 0},
+         {-0.36, 0, -0.18171, -0.282523, 0.106726, 0.123808, 0.854894},
      }}},
     {80,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.2, 0.979796, 0, 0, 0, 0},
-         {-0.49, 0.502145, 0.712566, 0, 0, 0},
-         {-0.01, 0.232702, 0.151916, 0.960558, 0, 0},
-         {-0.05, 0.612372, 0.376106, 0.0206792, 0.693265, 0},
-         {-0.37, -0.320475, -0.365405, -0.00376264, 0.0364343, 0.790907},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.2, 0, 0.979796, 0, 0, 0, 0},
+         {-0.49, 0, 0.502145, 0.712566, 0, 0, 0},
+         {-0.01, 0, 0.232702, 0.151916, 0.960558, 0, 0},
+         {-0.05, 0, 0.612372, 0.376106, 0.0206792, 0.693265, 0},
+         {-0.37, 0, -0.320475, -0.365405, -0.00376264, 0.0364343, 0.790907},
      }}},
     {90,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.19, 0.981784, 0, 0, 0, 0},
-         {-0.38, 0.58852, 0.713613, 0, 0, 0},
-         {-0.03, 0.360874, 0.12082, 0.924269, 0, 0},
-         {-0.12, 0.526796, 0.34244, 0.0594196, 0.766348, 0},
-         {-0.33, -0.257389, -0.24372, -0.257035, -0.176521, 0.817451},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.19, 0, 0.981784, 0, 0, 0, 0},
+         {-0.38, 0, 0.58852, 0.713613, 0, 0, 0},
+         {-0.03, 0, 0.360874, 0.12082, 0.924269, 0, 0},
+         {-0.12, 0, 0.526796, 0.34244, 0.0594196, 0.766348, 0},
+         {-0.33, 0, -0.257389, -0.24372, -0.257035, -0.176521, 0.817451},
      }}},
 };
 
@@ -418,18 +452,20 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_Suburban_LOS = {
 /**
  * The square root matrix for <em>NTN Suburban NLOS</em>, which is generated
  * using the Cholesky decomposition according to 3GPP TR 38.811 v15.4.0 table 6.7.2-6 and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static constexpr std::array<std::array<double, 6>, 6> sqrtC_NTN_Suburban_NLOS = {{
-    {1, 0, 0, 0, 0, 0},
-    {-0.4, 0.916515, 0, 0, 0, 0},
-    {-0.6, 0.174574, 0.78072, 0, 0, 0},
-    {0, 0.654654, 0.365963, 0.661438, 0, 0},
-    {0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
-    {-0.4, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
+static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_Suburban_NLOS = {{
+    {1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0},
+    {-0.4, 0, 0.916515, 0, 0, 0, 0},
+    {-0.6, 0, 0.174574, 0.78072, 0, 0, 0},
+    {0, 0, 0.654654, 0.365963, 0.661438, 0, 0},
+    {0, 0, -0.545545, 0.762422, 0.118114, 0.327327, 0},
+    {-0.4, 0, -0.174574, -0.396459, 0.392138, 0.49099, 0.507445},
 }};
 
 /**
@@ -453,101 +489,112 @@ static constexpr std::array<std::array<double, 7>, 7> sqrtC_NTN_Rural_LOS = {{
 /**
  * The square root matrix for <em>NTN Rural NLOS S Band</em>, which is generated
  * using the Cholesky decomposition according to 3GPP TR 38.811 v15.4.0 table 6.7.2-8a and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The square root matrix is dependent on the elevation angle, thus requiring a map.
  *
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static const std::map<int, std::array<std::array<double, 6>, 6>> sqrtC_NTN_Rural_NLOS_S{
+static const std::map<int, std::array<std::array<double, 7>, 7>> sqrtC_NTN_Rural_NLOS_S{
     {10,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.36, 0.932952, 0, 0, 0, 0},
-         {0.45, 0.516639, 0.728412, 0, 0, 0},
-         {0.02, 0.329277, 0.371881, 0.867687, 0, 0},
-         {-0.06, 0.59853, 0.436258, -0.0324062, 0.668424, 0},
-         {-0.07, 0.0373009, 0.305087, -0.0280496, -0.225204, 0.921481},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.36, 0, 0.932952, 0, 0, 0, 0},
+         {0.45, 0, 0.516639, 0.728412, 0, 0, 0},
+         {0.02, 0, 0.329277, 0.371881, 0.867687, 0, 0},
+         {-0.06, 0, 0.59853, 0.436258, -0.0324062, 0.668424, 0},
+         {-0.07, 0, 0.0373009, 0.305087, -0.0280496, -0.225204, 0.921481},
      }}},
     {20,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.39, 0.920815, 0, 0, 0, 0},
-         {0.52, 0.426579, 0.740021, 0, 0, 0},
-         {0, 0.347518, -0.0381664, 0.936896, 0, 0},
-         {-0.04, 0.710675, 0.172483, 0.116993, 0.670748, 0},
-         {-0.17, -0.0394216, 0.115154, 0.243458, -0.0702635, 0.944498},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.39, 0, 0.920815, 0, 0, 0, 0},
+         {0.52, 0, 0.426579, 0.740021, 0, 0, 0},
+         {0, 0, 0.347518, -0.0381664, 0.936896, 0, 0},
+         {-0.04, 0, 0.710675, 0.172483, 0.116993, 0.670748, 0},
+         {-0.17, 0, -0.0394216, 0.115154, 0.243458, -0.0702635, 0.944498},
      }}},
     {30,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.41, 0.912086, 0, 0, 0, 0},
-         {0.54, 0.49491, 0.680782, 0, 0, 0},
-         {0, 0.350844, -0.152231, 0.923977, 0, 0},
-         {-0.04, 0.694672, 0.0702137, 0.0832998, 0.709903, 0},
-         {-0.19, -0.0854087, 0.0805978, 0.283811, -0.137441, 0.922318},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.41, 0, 0.912086, 0, 0, 0, 0},
+         {0.54, 0, 0.49491, 0.680782, 0, 0, 0},
+         {0, 0, 0.350844, -0.152231, 0.923977, 0, 0},
+         {-0.04, 0, 0.694672, 0.0702137, 0.0832998, 0.709903, 0},
+         {-0.19, 0, -0.0854087, 0.0805978, 0.283811, -0.137441, 0.922318},
      }}},
     {40,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.37, 0.929032, 0, 0, 0, 0},
-         {0.53, 0.480177, 0.698949, 0, 0, 0},
-         {0.01, 0.434538, 0.00864797, 0.900556, 0, 0},
-         {-0.05, 0.765851, -0.0303947, 0.0421641, 0.63896, 0},
-         {-0.17, -0.16458, 0.0989022, 0.158081, -0.150425, 0.941602},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.37, 0, 0.929032, 0, 0, 0, 0},
+         {0.53, 0, 0.480177, 0.698949, 0, 0, 0},
+         {0.01, 0, 0.434538, 0.00864797, 0.900556, 0, 0},
+         {-0.05, 0, 0.765851, -0.0303947, 0.0421641, 0.63896, 0},
+         {-0.17, 0, -0.16458, 0.0989022, 0.158081, -0.150425, 0.941602},
      }}},
     {50,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.4, 0.916515, 0, 0, 0, 0},
-         {0.55, 0.403703, 0.731111, 0, 0, 0},
-         {0.02, 0.499719, -0.0721341, 0.862947, 0, 0},
-         {-0.06, 0.835775, -0.156481, 0.0373835, 0.521534, 0},
-         {-0.19, -0.301141, 0.145082, 0.144564, -0.0238067, 0.911427},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.4, 0, 0.916515, 0, 0, 0, 0},
+         {0.55, 0, 0.403703, 0.731111, 0, 0, 0},
+         {0.02, 0, 0.499719, -0.0721341, 0.862947, 0, 0},
+         {-0.06, 0, 0.835775, -0.156481, 0.0373835, 0.521534, 0},
+         {-0.19, 0, -0.301141, 0.145082, 0.144564, -0.0238067, 0.911427},
      }}},
     {60,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.41, 0.912086, 0, 0, 0, 0},
-         {0.56, 0.339442, 0.755764, 0, 0, 0},
-         {0.02, 0.436582, -0.0256617, 0.899076, 0, 0},
-         {-0.07, 0.856608, -0.12116, 0.0715303, 0.491453, 0},
-         {-0.2, -0.331109, 0.15136, 0.036082, 0.031313, 0.908391},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.41, 0, 0.912086, 0, 0, 0, 0},
+         {0.56, 0, 0.339442, 0.755764, 0, 0, 0},
+         {0.02, 0, 0.436582, -0.0256617, 0.899076, 0, 0},
+         {-0.07, 0, 0.856608, -0.12116, 0.0715303, 0.491453, 0},
+         {-0.2, 0, -0.331109, 0.15136, 0.036082, 0.031313, 0.908391},
      }}},
     {70,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.4, 0.916515, 0, 0, 0, 0},
-         {0.56, 0.386246, 0.732949, 0, 0, 0},
-         {0.04, 0.573913, -0.0601289, 0.815726, 0, 0},
-         {-0.11, 0.813953, -0.0720183, 0.0281118, 0.565158, 0},
-         {-0.19, -0.432071, 0.236423, -0.0247788, -0.0557206, 0.847113},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.4, 0, 0.916515, 0, 0, 0, 0},
+         {0.56, 0, 0.386246, 0.732949, 0, 0, 0},
+         {0.04, 0, 0.573913, -0.0601289, 0.815726, 0, 0},
+         {-0.11, 0, 0.813953, -0.0720183, 0.0281118, 0.565158, 0},
+         {-0.19, 0, -0.432071, 0.236423, -0.0247788, -0.0557206, 0.847113},
      }}},
     {80,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.46, 0.887919, 0, 0, 0, 0},
-         {0.58, 0.469412, 0.665772, 0, 0, 0},
-         {0.01, 0.309262, -0.286842, 0.90663, 0, 0},
-         {-0.05, 0.762457, -0.268721, -0.0467443, 0.584605, 0},
-         {-0.23, -0.580909, 0.399665, 0.0403629, 0.326208, 0.584698},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.46, 0, 0.887919, 0, 0, 0, 0},
+         {0.58, 0, 0.469412, 0.665772, 0, 0, 0},
+         {0.01, 0, 0.309262, -0.286842, 0.90663, 0, 0},
+         {-0.05, 0, 0.762457, -0.268721, -0.0467443, 0.584605, 0},
+         {-0.23, 0, -0.580909, 0.399665, 0.0403629, 0.326208, 0.584698},
      }}},
     {90,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.3, 0.953939, 0, 0, 0, 0},
-         {0.47, 0.81871, 0.329868, 0, 0, 0},
-         {0.06, 0.0712834, -0.595875, 0.797654, 0, 0},
-         {-0.1, 0.408831, -0.0233859, 0.0412736, 0.905873, 0},
-         {-0.13, -0.407783, 0.439436, -0.0768289, -0.212875, 0.756631},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.3, 0, 0.953939, 0, 0, 0, 0},
+         {0.47, 0, 0.81871, 0.329868, 0, 0, 0},
+         {0.06, 0, 0.0712834, -0.595875, 0.797654, 0, 0},
+         {-0.1, 0, 0.408831, -0.0233859, 0.0412736, 0.905873, 0},
+         {-0.13, 0, -0.407783, 0.439436, -0.0768289, -0.212875, 0.756631},
      }}},
 };
 
 /**
  * The square root matrix for <em>NTN Rural NLOS Ka Band</em>, which is generated
  * using the Cholesky decomposition according to 3GPP TR 38.811 v15.4.0 table 6.7.2-8b and follows
- * the order of [SF, DS, ASD, ASA, ZSD, ZSA].
+ * the order of [SF, K, DS, ASD, ASA, ZSD, ZSA], with an uncorrelated K entry (no
+ * K-factor).
  *
  * The square root matrix is dependent on the elevation angle, which acts as the corresponding map's
  * key.
@@ -555,87 +602,96 @@ static const std::map<int, std::array<std::array<double, 6>, 6>> sqrtC_NTN_Rural
  * The Matlab file to generate the matrices can be found in
  * https://github.com/nyuwireless-unipd/ns3-mmwave/blob/master/src/mmwave/model/BeamFormingMatrix/SqrtMatrix.m
  */
-static const std::map<int, std::array<std::array<double, 6>, 6>> sqrtC_NTN_Rural_NLOS_Ka{
+static const std::map<int, std::array<std::array<double, 7>, 7>> sqrtC_NTN_Rural_NLOS_Ka{
     {10,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.36, 0.932952, 0, 0, 0, 0},
-         {0.45, 0.527358, 0.72069, 0, 0, 0},
-         {0.02, 0.350715, 0.355282, 0.866241, 0, 0},
-         {-0.07, 0.562515, 0.478504, 0.0162932, 0.670406, 0},
-         {-0.06, 0.0411597, 0.270982, 0.0121094, -0.159927, 0.946336},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.36, 0, 0.932952, 0, 0, 0, 0},
+         {0.45, 0, 0.527358, 0.72069, 0, 0, 0},
+         {0.02, 0, 0.350715, 0.355282, 0.866241, 0, 0},
+         {-0.07, 0, 0.562515, 0.478504, 0.0162932, 0.670406, 0},
+         {-0.06, 0, 0.0411597, 0.270982, 0.0121094, -0.159927, 0.946336},
      }}},
     {20,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.38, 0.924986, 0, 0, 0, 0},
-         {0.52, 0.473088, 0.711188, 0, 0, 0},
-         {0, 0.367573, -0.0617198, 0.927944, 0, 0},
-         {-0.04, 0.68628, 0.149228, 0.115257, 0.701332, 0},
-         {-0.16, -0.0441088, 0.118207, 0.251641, -0.0752458, 0.943131},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.38, 0, 0.924986, 0, 0, 0, 0},
+         {0.52, 0, 0.473088, 0.711188, 0, 0, 0},
+         {0, 0, 0.367573, -0.0617198, 0.927944, 0, 0},
+         {-0.04, 0, 0.68628, 0.149228, 0.115257, 0.701332, 0},
+         {-0.16, 0, -0.0441088, 0.118207, 0.251641, -0.0752458, 0.943131},
      }}},
     {30,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.42, 0.907524, 0, 0, 0, 0},
-         {0.54, 0.48131, 0.690464, 0, 0, 0},
-         {0, 0.363627, -0.137613, 0.921324, 0, 0},
-         {-0.04, 0.686704, 0.117433, 0.104693, 0.708581, 0},
-         {-0.19, -0.0438556, 0.0922685, 0.269877, -0.136292, 0.928469},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.42, 0, 0.907524, 0, 0, 0, 0},
+         {0.54, 0, 0.48131, 0.690464, 0, 0, 0},
+         {0, 0, 0.363627, -0.137613, 0.921324, 0, 0},
+         {-0.04, 0, 0.686704, 0.117433, 0.104693, 0.708581, 0},
+         {-0.19, 0, -0.0438556, 0.0922685, 0.269877, -0.136292, 0.928469},
      }}},
     {40,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.36, 0.932952, 0, 0, 0, 0},
-         {0.53, 0.483197, 0.696865, 0, 0, 0},
-         {0.01, 0.464761, -0.0285153, 0.88492, 0, 0},
-         {-0.05, 0.763169, 0.140255, 0.0562856, 0.626286, 0},
-         {-0.16, -0.126051, 0.0942905, 0.195354, -0.217188, 0.92967},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.36, 0, 0.932952, 0, 0, 0, 0},
+         {0.53, 0, 0.483197, 0.696865, 0, 0, 0},
+         {0.01, 0, 0.464761, -0.0285153, 0.88492, 0, 0},
+         {-0.05, 0, 0.763169, 0.140255, 0.0562856, 0.626286, 0},
+         {-0.16, 0, -0.126051, 0.0942905, 0.195354, -0.217188, 0.92967},
      }}},
     {50,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.39, 0.920815, 0, 0, 0, 0},
-         {0.55, 0.406705, 0.729446, 0, 0, 0},
-         {0.01, 0.503793, -0.123923, 0.854831, 0, 0},
-         {-0.06, 0.821664, -0.207246, 0.0245302, 0.526988, 0},
-         {-0.19, -0.254231, 0.10679, 0.190931, -0.0665276, 0.920316},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.39, 0, 0.920815, 0, 0, 0, 0},
+         {0.55, 0, 0.406705, 0.729446, 0, 0, 0},
+         {0.01, 0, 0.503793, -0.123923, 0.854831, 0, 0},
+         {-0.06, 0, 0.821664, -0.207246, 0.0245302, 0.526988, 0},
+         {-0.19, 0, -0.254231, 0.10679, 0.190931, -0.0665276, 0.920316},
      }}},
     {60,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.42, 0.907524, 0, 0, 0, 0},
-         {0.56, 0.391395, 0.730213, 0, 0, 0},
-         {0.02, 0.427978, -0.0393147, 0.902712, 0, 0},
-         {-0.06, 0.820694, -0.119986, 0.105509, 0.545281, 0},
-         {-0.2, -0.279882, 0.180145, 0.0563477, -0.0121631, 0.919723},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.42, 0, 0.907524, 0, 0, 0, 0},
+         {0.56, 0, 0.391395, 0.730213, 0, 0, 0},
+         {0.02, 0, 0.427978, -0.0393147, 0.902712, 0, 0},
+         {-0.06, 0, 0.820694, -0.119986, 0.105509, 0.545281, 0},
+         {-0.2, 0, -0.279882, 0.180145, 0.0563477, -0.0121631, 0.919723},
      }}},
     {70,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.36, 0.932952, 0, 0, 0, 0},
-         {0.54, 0.519212, 0.662434, 0, 0, 0},
-         {0.04, 0.412025, -0.0234416, 0.909992, 0, 0},
-         {-0.09, 0.758452, -0.0682296, 0.0214276, 0.64151, 0},
-         {-0.17, -0.387158, 0.306169, -0.0291255, -0.109344, 0.845378},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.36, 0, 0.932952, 0, 0, 0, 0},
+         {0.54, 0, 0.519212, 0.662434, 0, 0, 0},
+         {0.04, 0, 0.412025, -0.0234416, 0.909992, 0, 0},
+         {-0.09, 0, 0.758452, -0.0682296, 0.0214276, 0.64151, 0},
+         {-0.17, 0, -0.387158, 0.306169, -0.0291255, -0.109344, 0.845378},
      }}},
     {80,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.44, 0.897998, 0, 0, 0, 0},
-         {0.57, 0.43519, 0.696928, 0, 0, 0},
-         {0.01, 0.316705, -0.248988, 0.915207, 0, 0},
-         {-0.06, 0.805793, -0.296262, -0.0419182, 0.507514, 0},
-         {-0.22, -0.497551, 0.289742, 0.0785823, 0.328773, 0.711214},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.44, 0, 0.897998, 0, 0, 0, 0},
+         {0.57, 0, 0.43519, 0.696928, 0, 0, 0},
+         {0.01, 0, 0.316705, -0.248988, 0.915207, 0, 0},
+         {-0.06, 0, 0.805793, -0.296262, -0.0419182, 0.507514, 0},
+         {-0.22, 0, -0.497551, 0.289742, 0.0785823, 0.328773, 0.711214},
      }}},
     {90,
      {{
-         {1, 0, 0, 0, 0, 0},
-         {-0.27, 0.96286, 0, 0, 0, 0},
-         {0.46, 0.741748, 0.488067, 0, 0, 0},
-         {0.04, 0.0735309, -0.374828, 0.923308, 0, 0},
-         {-0.08, 0.517624, 0.128779, 0.0795063, 0.838308, 0},
-         {-0.11, -0.321646, 0.0802763, -0.131981, -0.193429, 0.907285},
+         {1, 0, 0, 0, 0, 0, 0},
+         {0, 1, 0, 0, 0, 0, 0},
+         {-0.27, 0, 0.96286, 0, 0, 0, 0},
+         {0.46, 0, 0.741748, 0.488067, 0, 0, 0},
+         {0.04, 0, 0.0735309, -0.374828, 0.923308, 0, 0},
+         {-0.08, 0, 0.517624, 0.128779, 0.0795063, 0.838308, 0},
+         {-0.11, 0, -0.321646, 0.0802763, -0.131981, -0.193429, 0.907285},
      }}},
 };
 
@@ -1140,6 +1196,7 @@ ThreeGppChannelModel::DoDispose()
     }
     m_channelMatrixMap.clear();
     m_channelParamsMap.clear();
+    m_fieldWindowCache.clear();
     m_channelConditionModel = nullptr;
 }
 
@@ -1181,6 +1238,16 @@ ThreeGppChannelModel::GetTypeId()
                 TimeValue(MilliSeconds(0)),
                 MakeTimeAccessor(&ThreeGppChannelModel::m_updatePeriod),
                 MakeTimeChecker())
+            .AddAttribute(
+                "LosRayOnly",
+                "When enabled, the stochastic cluster coefficients (fading) are suppressed and "
+                "only the LOS ray, steering, and antenna field patterns are preserved. This "
+                "corresponds to a K-factor of infinity in TR 38.901 eq. (7.5-30). The resulting "
+                "LOS channel is deterministic and no longer conforms to the TR 38.901/38.811 "
+                "statistical model. This attribute has no effect on NLOS channels.",
+                BooleanValue(false),
+                MakeBooleanAccessor(&ThreeGppChannelModel::m_losRayOnly),
+                MakeBooleanChecker())
             // attributes for the blockage model
             .AddAttribute("Blockage",
                           "Enable blockage model A (sec 7.6.4.1)",
@@ -1209,7 +1276,32 @@ ThreeGppChannelModel::GetTypeId()
                           "delayed (reflected) paths",
                           DoubleValue(0.0),
                           MakeDoubleAccessor(&ThreeGppChannelModel::m_vScatt),
-                          MakeDoubleChecker<double>(0.0));
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("LargeBandwidthArrayModeling",
+                          "Enable the intra-cluster angular and delay spread modeling of 3GPP TR "
+                          "38.901 Sec. 7.6.2.2: per-ray offset angles (7.6-5), delays and powers "
+                          "(7.6-6) and a bandwidth/aperture-dependent ray count (7.6-8), each ray "
+                          "becoming an individually delayed tap without the sub-cluster mapping "
+                          "of Table 7.5-5. Set ChannelBandwidth to the simulation bandwidth. "
+                          "Procedure A updates are replaced by a full regeneration, temporally "
+                          "consistent only together with the InterUeSpatialConsistency "
+                          "attribute of the ChannelConditionModel.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&ThreeGppChannelModel::m_largeBandwidthArrayModeling),
+                          MakeBooleanChecker())
+            .AddAttribute("ChannelBandwidth",
+                          "Simulation bandwidth B in Hz used by the large bandwidth modeling "
+                          "of TR 38.901 Sec. 7.6.2.2 (Equation 7.6-8).",
+                          DoubleValue(100e6),
+                          MakeDoubleAccessor(&ThreeGppChannelModel::m_channelBandwidth),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("MaxRaysPerCluster",
+                          "Upper limit Mmax on the number of rays per cluster in Equation "
+                          "(7.6-8) of TR 38.901, trading accuracy for complexity. Only used "
+                          "when LargeBandwidthArrayModeling is enabled.",
+                          UintegerValue(20),
+                          MakeUintegerAccessor(&ThreeGppChannelModel::m_maxRaysPerCluster),
+                          MakeUintegerChecker<uint8_t>(1));
     return tid;
 }
 
@@ -1361,9 +1453,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_perClusterRayDcorDistance = 60;
             table3gpp->m_blockerDcorDistance = 10;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_RMa_NLOS[row][column];
                 }
@@ -1398,9 +1490,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_perClusterRayDcorDistance = 15;
             table3gpp->m_blockerDcorDistance = 5;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_RMa_O2I[row][column];
                 }
@@ -1485,9 +1577,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterRayDcorDistance = 50;
                 table3gpp->m_blockerDcorDistance = 10;
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_UMa_NLOS[row][column];
                     }
@@ -1521,9 +1613,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterRayDcorDistance = 15;
                 table3gpp->m_blockerDcorDistance = 5;
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_UMa_O2I[row][column];
                     }
@@ -1603,9 +1695,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterRayDcorDistance = 15;
                 table3gpp->m_blockerDcorDistance = 10;
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_UMi_NLOS[row][column];
                     }
@@ -1639,9 +1731,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterRayDcorDistance = 15;
                 table3gpp->m_blockerDcorDistance = 5;
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_UMi_O2I[row][column];
                     }
@@ -1716,9 +1808,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_perClusterRayDcorDistance = 10;
             table3gpp->m_blockerDcorDistance = 5;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_office_NLOS[row][column];
                 }
@@ -1789,9 +1881,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_sigXpr = 3;
             table3gpp->m_perClusterShadowingStd = 4;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_UMi_NLOS[row][column];
                 }
@@ -1823,9 +1915,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_sigXpr = 3;
             table3gpp->m_perClusterShadowingStd = 4;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_UMi_LOS[row][column];
                 }
@@ -1898,9 +1990,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_sigXpr = 3;
             table3gpp->m_perClusterShadowingStd = 4;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_UMi_LOS[row][column];
                 }
@@ -1936,9 +2028,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
             table3gpp->m_sigXpr = 3;
             table3gpp->m_perClusterShadowingStd = 4;
 
-            for (uint8_t row = 0; row < 6; row++)
+            for (uint8_t row = 0; row < 7; row++)
             {
-                for (uint8_t column = 0; column < 6; column++)
+                for (uint8_t column = 0; column < 7; column++)
                 {
                     table3gpp->m_sqrtC[row][column] = sqrtC_UMi_NLOS[row][column];
                 }
@@ -2082,9 +2174,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterShadowingStd =
                     NTNDenseUrbanNLOS.at(freqBand).at(elevAngleQuantized)[perClusterShadowingStd];
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_NTN_DenseUrban_NLOS[row][column];
                     }
@@ -2157,9 +2249,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterShadowingStd =
                     NTNUrbanNLOS.at(freqBand).at(elevAngleQuantized)[perClusterShadowingStd];
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] =
                             sqrtC_NTN_Urban_NLOS.at(elevAngleQuantized)[row][column];
@@ -2241,9 +2333,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 table3gpp->m_perClusterShadowingStd =
                     NTNSuburbanNLOS.at(freqBand).at(elevAngleQuantized)[perClusterShadowingStd];
 
-                for (uint8_t row = 0; row < 6; row++)
+                for (uint8_t row = 0; row < 7; row++)
                 {
-                    for (uint8_t column = 0; column < 6; column++)
+                    for (uint8_t column = 0; column < 7; column++)
                     {
                         table3gpp->m_sqrtC[row][column] = sqrtC_NTN_Suburban_NLOS[row][column];
                     }
@@ -2318,9 +2410,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
 
                 if (freqBand == "S")
                 {
-                    for (uint8_t row = 0; row < 6; row++)
+                    for (uint8_t row = 0; row < 7; row++)
                     {
-                        for (uint8_t column = 0; column < 6; column++)
+                        for (uint8_t column = 0; column < 7; column++)
                         {
                             table3gpp->m_sqrtC[row][column] =
                                 sqrtC_NTN_Rural_NLOS_S.at(elevAngleQuantized)[row][column];
@@ -2329,9 +2421,9 @@ ThreeGppChannelModel::GetThreeGppTable(Ptr<const MobilityModel> aMob,
                 }
                 else if (freqBand == "Ka")
                 {
-                    for (uint8_t row = 0; row < 6; row++)
+                    for (uint8_t row = 0; row < 7; row++)
                     {
-                        for (uint8_t column = 0; column < 6; column++)
+                        for (uint8_t column = 0; column < 7; column++)
                         {
                             table3gpp->m_sqrtC[row][column] =
                                 sqrtC_NTN_Rural_NLOS_Ka.at(elevAngleQuantized)[row][column];
@@ -2392,6 +2484,17 @@ ThreeGppChannelModel::NewChannelParamsNeeded(uint64_t channelParamsKey,
         if (!condition->IsEqual(it->second->m_losCondition, it->second->m_o2iCondition))
         {
             NS_LOG_DEBUG("New channel parameters needed because LOS or O2I condition changed");
+            return true;
+        }
+
+        // The Procedure A update operates on the cluster-level structures, which
+        // the large bandwidth modeling replaces by per-ray taps. With
+        // InterUeSpatialConsistency enabled the regenerated parameters remain
+        // consistent with the previous position.
+        if (m_largeBandwidthArrayModeling && ChannelUpdateNeeded(it->second, aMob, bMob))
+        {
+            NS_LOG_DEBUG("New channel parameters needed because the large bandwidth modeling "
+                         "replaces the channel update by a regeneration");
             return true;
         }
     }
@@ -2534,9 +2637,13 @@ ThreeGppChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
     {
         NS_LOG_DEBUG(
             "Create new or regenerate the channel parameters because the condition has changed");
-        m_channelParamsMap.insert_or_assign(
-            channelParamsKey,
-            GenerateChannelParameters(condition, table3gpp, aMobOrdered, bMobOrdered));
+        m_channelParamsMap.insert_or_assign(channelParamsKey,
+                                            GenerateChannelParameters(condition,
+                                                                      table3gpp,
+                                                                      aMobOrdered,
+                                                                      bMobOrdered,
+                                                                      aAntenna,
+                                                                      bAntenna));
     }
     else
     {
@@ -2592,51 +2699,201 @@ ThreeGppChannelModel::GetParams(Ptr<const MobilityModel> aMob, Ptr<const Mobilit
     return nullptr;
 }
 
+void
+ThreeGppChannelModel::GetLspCorrelationDistances(std::array<double, 7>& los,
+                                                 std::array<double, 7>& nlos,
+                                                 std::array<double, 7>& o2i) const
+{
+    // TR 38.901 Table 7.5-6 correlation distances in the horizontal plane
+    // (meters), in canonical parameter order [SF,K,DS,ASD,ASA,ZSD,ZSA]. The
+    // NLOS/O2I columns have no K entry, so theirs is a 0 placeholder.
+    // Scenarios without a Table 7.5-6 column (V2V, NTN) fall back to the UMa
+    // distances.
+    los = {37, 12, 30, 18, 15, 15, 15};
+    nlos = {50, 0, 40, 50, 50, 50, 50};
+    o2i = {7, 0, 10, 11, 17, 25, 25};
+    if (m_scenario == "UMi-StreetCanyon")
+    {
+        los = {10, 15, 7, 8, 8, 12, 12};
+        nlos = {13, 0, 10, 10, 9, 10, 10};
+        o2i = {7, 0, 10, 11, 17, 25, 25};
+    }
+    else if (m_scenario == "RMa")
+    {
+        los = {37, 40, 50, 25, 35, 15, 15};
+        nlos = {120, 0, 36, 30, 40, 50, 50};
+        o2i = nlos;
+    }
+    else if (m_scenario == "InH-OfficeMixed" || m_scenario == "InH-OfficeOpen")
+    {
+        los = {10, 4, 8, 7, 5, 4, 4};
+        nlos = {6, 0, 5, 3, 3, 4, 4};
+        o2i = nlos;
+    }
+}
+
+double
+ThreeGppChannelModel::SampleSpatiallyCorrelatedNormal(uint32_t siteNodeId,
+                                                      uint8_t condSlot,
+                                                      uint32_t varId,
+                                                      const Vector& position,
+                                                      double corrDist) const
+{
+    // One independent field per (site, condition slot, variate).
+    const uint64_t fieldKey = (static_cast<uint64_t>(siteNodeId) << 32) |
+                              (static_cast<uint64_t>(condSlot) << 29) |
+                              static_cast<uint64_t>(varId);
+
+    if (corrDist <= 0.0)
+    {
+        return kClusterField.Sample(fieldKey, position, corrDist);
+    }
+
+    // The window weights depend only on (position, corrDist), which are shared
+    // by every variate drawn for one link (and, for the cluster/ray variates,
+    // by all of them), so they are cached and reused across the thousands of
+    // field draws of one channel generation.
+    if (m_fieldWindowPos.x != position.x || m_fieldWindowPos.y != position.y)
+    {
+        m_fieldWindowPos = position;
+        m_fieldWindowCache.clear();
+    }
+    auto [wIt, wInserted] = m_fieldWindowCache.try_emplace(corrDist);
+    if (wInserted)
+    {
+        wIt->second = SpatialGaussianField::ComputeWindow(position, corrDist);
+    }
+    return kClusterField.SampleWindow(fieldKey, wIt->second);
+}
+
+double
+ThreeGppChannelModel::GetClusterCorrelationDistance(
+    ChannelCondition::LosConditionValue losCondition,
+    bool isO2i) const
+{
+    // TR 38.901 Table 7.6.3.1-2, correlation distance of the cluster and ray
+    // specific random variables in the horizontal plane (meters). Scenarios
+    // without a column (V2V, NTN) fall back to the UMa distances.
+    double los = 40;
+    double nlos = 50;
+    double o2i = 15;
+    if (m_scenario == "UMi-StreetCanyon")
+    {
+        los = 12;
+        nlos = 15;
+        o2i = 15;
+    }
+    else if (m_scenario == "RMa")
+    {
+        los = 50;
+        nlos = 60;
+        o2i = 15;
+    }
+    else if (m_scenario == "InH-OfficeMixed" || m_scenario == "InH-OfficeOpen")
+    {
+        los = 10;
+        nlos = 10;
+        o2i = 10;
+    }
+    return isO2i ? o2i : (losCondition == ChannelCondition::LOS ? los : nlos);
+}
+
+double
+ThreeGppChannelModel::ScNormal(uint32_t varId) const
+{
+    if (!m_scDrawCtx.active)
+    {
+        return m_normalRv->GetValue();
+    }
+    return SampleSpatiallyCorrelatedNormal(m_scDrawCtx.siteNodeId,
+                                           m_scDrawCtx.condSlot,
+                                           varId,
+                                           m_scDrawCtx.termPos,
+                                           m_scDrawCtx.corrDist);
+}
+
+double
+ThreeGppChannelModel::ScUniform01(uint32_t varId) const
+{
+    if (!m_scDrawCtx.active)
+    {
+        return m_uniformRv->GetValue(0, 1);
+    }
+    // Probability-integral transform preserving the spatial correlation of the
+    // underlying Gaussian field; clamped so log() and tan() consumers remain
+    // finite.
+    const double u = 0.5 * std::erfc(-ScNormal(varId) * M_SQRT1_2);
+    return std::clamp(u, 1e-12, 1.0 - 1e-12);
+}
+
 ThreeGppChannelModel::LargeScaleParameters
-ThreeGppChannelModel::GenerateLSPs(const ChannelCondition::LosConditionValue losCondition,
-                                   Ptr<const ParamsTable> table3gpp) const
+ThreeGppChannelModel::GenerateLSPs(Ptr<const ChannelCondition> channelCondition,
+                                   Ptr<const ParamsTable> table3gpp,
+                                   Ptr<const MobilityModel> siteMob,
+                                   Ptr<const MobilityModel> termMob) const
 {
     NS_LOG_FUNCTION(this);
-    DoubleVector lspIndepRandomVar;
-    DoubleVector lsp;
-    const uint8_t paramNum = losCondition == ChannelCondition::LOS ? 7 : 6;
-
-    // Generate paramNum independent LSPs.
-    for (uint8_t iter = 0; iter < paramNum; iter++)
+    // Every correlation matrix follows the order [SF,K,DS,ASD,ASA,ZSD,ZSA]. The
+    // NLOS and O2I columns of TR 38.901 Table 7.5-6, which have no K-factor, have
+    // an uncorrelated K entry with zero mean and deviation, so their K-factor is
+    // 0 dB whatever its variate, and the other LSPs keep their joint distribution.
+    constexpr uint8_t numLsps = 7;
+    std::array<double, numLsps> lspIndepRandomVar;
+    if (!m_channelConditionModel->IsInterUeSpatialConsistencyEnabled())
     {
-        lspIndepRandomVar.push_back(m_normalRv->GetValue());
-    }
-    for (uint8_t row = 0; row < paramNum; row++)
-    {
-        double temp = 0;
-        for (uint8_t column = 0; column < paramNum; column++)
+        for (auto& var : lspIndepRandomVar)
         {
-            temp += table3gpp->m_sqrtC[row][column] * lspIndepRandomVar[column];
+            var = m_normalRv->GetValue();
         }
-        lsp.push_back(temp);
-    }
-
-    LargeScaleParameters lsps;
-    // NOTE the shadowing is generated in the propagation loss model
-    // For LOS, LSP is following the order of [SF,K,DS,ASD,ASA,ZSD,ZSA].
-    // For NLOS, LSP is following the order of [SF,DS,ASD,ASA,ZSD,ZSA].
-    if (losCondition == ChannelCondition::LOS)
-    {
-        lsps.kFactor = lsp[1] * table3gpp->m_sigK + table3gpp->m_uK;
-        lsps.DS = pow(10, lsp[2] * table3gpp->m_sigLgDS + table3gpp->m_uLgDS);
-        lsps.ASD = pow(10, lsp[3] * table3gpp->m_sigLgASD + table3gpp->m_uLgASD);
-        lsps.ASA = pow(10, lsp[4] * table3gpp->m_sigLgASA + table3gpp->m_uLgASA);
-        lsps.ZSD = pow(10, lsp[5] * table3gpp->m_sigLgZSD + table3gpp->m_uLgZSD);
-        lsps.ZSA = pow(10, lsp[6] * table3gpp->m_sigLgZSA + table3gpp->m_uLgZSA);
     }
     else
     {
-        lsps.DS = pow(10, lsp[1] * table3gpp->m_sigLgDS + table3gpp->m_uLgDS);
-        lsps.ASD = pow(10, lsp[2] * table3gpp->m_sigLgASD + table3gpp->m_uLgASD);
-        lsps.ASA = pow(10, lsp[3] * table3gpp->m_sigLgASA + table3gpp->m_uLgASA);
-        lsps.ZSD = pow(10, lsp[4] * table3gpp->m_sigLgZSD + table3gpp->m_uLgZSD);
-        lsps.ZSA = pow(10, lsp[5] * table3gpp->m_sigLgZSA + table3gpp->m_uLgZSA);
+        // Inter-UE spatial consistency (TR 38.901 Sec. 7.6.3.1): replace the
+        // i.i.d. draws with samples of per-site spatially-correlated Gaussian
+        // fields evaluated at the terminal position. The cross-correlation
+        // multiply below is untouched.
+        std::array<double, 7> corrLos;
+        std::array<double, 7> corrNlos;
+        std::array<double, 7> corrO2i;
+        GetLspCorrelationDistances(corrLos, corrNlos, corrO2i);
+
+        // Condition slot selecting the field set: LOS=0, NLOS=1, O2I=2.
+        const bool isO2i = channelCondition->GetO2iCondition() == ChannelCondition::O2I;
+        const bool isLos = channelCondition->GetLosCondition() == ChannelCondition::LOS;
+        const uint8_t condSlot = isO2i ? 2 : (isLos ? 0 : 1);
+        const auto& corrDist = isO2i ? corrO2i : (isLos ? corrLos : corrNlos);
+        const uint32_t siteNodeId = siteMob->GetObject<Node>()->GetId();
+        const Vector termPos = termMob->GetPosition();
+        for (uint8_t paramId = 0; paramId < numLsps; paramId++)
+        {
+            // The K-factor belongs to the LOS path, so its variate always comes
+            // from the LOS field: the NLOS and O2I columns have no K entry.
+            const bool isK = paramId == 1;
+            lspIndepRandomVar[paramId] =
+                SampleSpatiallyCorrelatedNormal(siteNodeId,
+                                                isK ? 0 : condSlot,
+                                                paramId,
+                                                termPos,
+                                                isK ? corrLos[1] : corrDist[paramId]);
+        }
     }
+    std::array<double, numLsps> lsp{};
+    for (uint8_t row = 0; row < numLsps; row++)
+    {
+        for (uint8_t column = 0; column <= row; column++)
+        {
+            lsp[row] += table3gpp->m_sqrtC[row][column] * lspIndepRandomVar[column];
+        }
+    }
+
+    // NOTE the shadowing is generated in the propagation loss model
+    LargeScaleParameters lsps;
+    lsps.kFactor = lsp[1] * table3gpp->m_sigK + table3gpp->m_uK;
+    lsps.DS = pow(10, lsp[2] * table3gpp->m_sigLgDS + table3gpp->m_uLgDS);
+    lsps.ASD = pow(10, lsp[3] * table3gpp->m_sigLgASD + table3gpp->m_uLgASD);
+    lsps.ASA = pow(10, lsp[4] * table3gpp->m_sigLgASA + table3gpp->m_uLgASA);
+    lsps.ZSD = pow(10, lsp[5] * table3gpp->m_sigLgZSD + table3gpp->m_uLgZSD);
+    lsps.ZSA = pow(10, lsp[6] * table3gpp->m_sigLgZSA + table3gpp->m_uLgZSA);
     lsps.ASD = std::min(lsps.ASD, 104.0);
     lsps.ASA = std::min(lsps.ASA, 104.0);
     lsps.ZSD = std::min(lsps.ZSD, 52.0);
@@ -2664,7 +2921,8 @@ ThreeGppChannelModel::GenerateClusterDelays(const double DS,
 
     for (uint8_t cIndex = 0; cIndex < table3gpp->m_numOfCluster; cIndex++)
     {
-        const double tau = -1 * table3gpp->m_rTau * DS * log(m_uniformRv->GetValue(0, 1)); //(7.5-1)
+        const double tau =
+            -1 * table3gpp->m_rTau * DS * log(ScUniform01(ScFieldVarId(0, cIndex, 0))); //(7.5-1)
         if (*minTau > tau)
         {
             *minTau = tau;
@@ -2690,7 +2948,8 @@ ThreeGppChannelModel::GenerateClusterShadowingTerm(Ptr<const ParamsTable> table3
 
     for (uint8_t cIndex = 0; cIndex < table3gpp->m_numOfCluster; cIndex++)
     {
-        (*clusterShadowing)[cIndex] = m_normalRv->GetValue() * table3gpp->m_perClusterShadowingStd;
+        (*clusterShadowing)[cIndex] =
+            ScNormal(ScFieldVarId(1, cIndex, 0)) * table3gpp->m_perClusterShadowingStd;
     }
 }
 
@@ -2816,14 +3075,14 @@ ThreeGppChannelModel::RemoveWeakClusters(DoubleVector* clusterPowers,
 
 void
 ThreeGppChannelModel::AdjustClusterDelaysForLosCondition(DoubleVector* clusterDelays,
-                                                         const uint8_t reducedClusterNumber,
+                                                         const uint16_t reducedClusterNumber,
                                                          const double kFactor) const
 {
     NS_LOG_FUNCTION(this);
     const double cTau = 0.7705 - 0.0433 * kFactor + 2e-4 * pow(kFactor, 2) +
                         17e-6 * pow(kFactor,
                                     3); //(7.5-3)
-    for (uint8_t cIndex = 0; cIndex < reducedClusterNumber; cIndex++)
+    for (uint16_t cIndex = 0; cIndex < reducedClusterNumber; cIndex++)
     {
         (*clusterDelays)[cIndex] = (*clusterDelays)[cIndex] / cTau; //(7.5-4)
     }
@@ -2872,17 +3131,17 @@ ThreeGppChannelModel::CalculateCtheta(const ChannelCondition::LosConditionValue 
 }
 
 void
-ThreeGppChannelModel::GenerateClusterXnNLos(const uint8_t clusterNumber,
+ThreeGppChannelModel::GenerateClusterXnNLos(const uint16_t clusterNumber,
                                             std::vector<int>* clusterSign) const
 {
     NS_LOG_FUNCTION(this);
     clusterSign->clear();
     clusterSign->resize(clusterNumber);
 
-    for (uint8_t cIndex = 0; cIndex < clusterNumber; cIndex++)
+    for (uint16_t cIndex = 0; cIndex < clusterNumber; cIndex++)
     {
         int Xn = 1;
-        if (m_uniformRv->GetValue(0, 1) < 0.5)
+        if (ScUniform01(ScFieldVarId(2, cIndex, 0)) < 0.5)
         {
             Xn = -1;
         }
@@ -2917,7 +3176,7 @@ ThreeGppChannelModel::GenerateClusterAngles(Ptr<const ThreeGppChannelParams> cha
     clusterZoa.resize(channelParams->m_reducedClusterNumber);
     clusterZod.resize(channelParams->m_reducedClusterNumber);
 
-    for (uint8_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+    for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
     {
         const double logCalc = -1 * log(clusterPowerForAngles[cIndex] / powerMax);
         double angle = 2 * sqrt(logCalc) / 1.4 / cPhi; //(7.5-9)
@@ -2931,32 +3190,35 @@ ThreeGppChannelModel::GenerateClusterAngles(Ptr<const ThreeGppChannelParams> cha
     const Angles sAngle(bMob->GetPosition(), aMob->GetPosition());
     const Angles uAngle(aMob->GetPosition(), bMob->GetPosition());
 
-    for (uint8_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+    for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
     {
         int Xn = 1;
-        if (m_uniformRv->GetValue(0, 1) < 0.5)
+        if (ScUniform01(ScFieldVarId(3, cIndex, 0)) < 0.5)
         {
             Xn = -1;
         }
 
-        clusterAoa[cIndex] = clusterAoa[cIndex] * Xn + m_normalRv->GetValue() * lsps.ASA / 7.0 +
+        clusterAoa[cIndex] = clusterAoa[cIndex] * Xn +
+                             ScNormal(ScFieldVarId(4, cIndex, 0)) * lsps.ASA / 7.0 +
                              RadiansToDegrees(uAngle.GetAzimuth()); //(7.5-11)
-        clusterAod[cIndex] = clusterAod[cIndex] * Xn + m_normalRv->GetValue() * lsps.ASD / 7.0 +
+        clusterAod[cIndex] = clusterAod[cIndex] * Xn +
+                             ScNormal(ScFieldVarId(4, cIndex, 1)) * lsps.ASD / 7.0 +
                              RadiansToDegrees(sAngle.GetAzimuth());
         if (channelParams->m_o2iCondition == ChannelCondition::O2I)
         {
-            clusterZoa[cIndex] =
-                clusterZoa[cIndex] * Xn + m_normalRv->GetValue() * lsps.ZSA / 7.0 + 90;
+            clusterZoa[cIndex] = clusterZoa[cIndex] * Xn +
+                                 ScNormal(ScFieldVarId(4, cIndex, 2)) * lsps.ZSA / 7.0 + 90;
             //(7.5-16)
         }
         else
         {
-            clusterZoa[cIndex] = clusterZoa[cIndex] * Xn + m_normalRv->GetValue() * lsps.ZSA / 7.0 +
+            clusterZoa[cIndex] = clusterZoa[cIndex] * Xn +
+                                 ScNormal(ScFieldVarId(4, cIndex, 2)) * lsps.ZSA / 7.0 +
                                  RadiansToDegrees(uAngle.GetInclination()); //(7.5-16)
         }
-        clusterZod[cIndex] = clusterZod[cIndex] * Xn + m_normalRv->GetValue() * lsps.ZSD / 7.0 +
-                             RadiansToDegrees(sAngle.GetInclination()) +
-                             table3gpp->m_offsetZOD; //(7.5-19)
+        clusterZod[cIndex] =
+            clusterZod[cIndex] * Xn + ScNormal(ScFieldVarId(4, cIndex, 3)) * lsps.ZSD / 7.0 +
+            RadiansToDegrees(sAngle.GetInclination()) + table3gpp->m_offsetZOD; //(7.5-19)
     }
 
     if (channelParams->m_losCondition == ChannelCondition::LOS)
@@ -2968,7 +3230,7 @@ ThreeGppChannelModel::GenerateClusterAngles(Ptr<const ThreeGppChannelParams> cha
         const double diffZsa = clusterZoa[0] - RadiansToDegrees(uAngle.GetInclination());
         const double diffZsd = clusterZod[0] - RadiansToDegrees(sAngle.GetInclination());
 
-        for (uint8_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+        for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
         {
             clusterAoa[cIndex] -= diffAoa; //(7.5-12)
             clusterAod[cIndex] -= diffAod;
@@ -3242,7 +3504,7 @@ ThreeGppChannelModel::ApplyAttenuationToClusterPowers(
                                   clusterAoa,
                                   clusterZoa,
                                   table3gpp);
-        for (uint8_t cInd = 0; cInd < channelParams->m_reducedClusterNumber; cInd++)
+        for (uint16_t cInd = 0; cInd < channelParams->m_reducedClusterNumber; cInd++)
         {
             (*clusterPowers)[cInd] =
                 (*clusterPowers)[cInd] / pow(10, (*attenuation_dB)[cInd] / 10.0);
@@ -3282,7 +3544,7 @@ ThreeGppChannelModel::ComputeRayAngles(Ptr<const ThreeGppChannelParams> channelP
     const double pow10_uLgZSD = std::pow(10.0, table3gpp->m_uLgZSD);
 
     // NOTE: offSetAlpha[m] must be available in scope (same as previous implementation)
-    for (uint8_t nInd = 0; nInd < channelParams->m_reducedClusterNumber; nInd++)
+    for (uint16_t nInd = 0; nInd < channelParams->m_reducedClusterNumber; nInd++)
     {
         for (uint8_t mInd = 0; mInd < table3gpp->m_raysPerCluster; mInd++)
         {
@@ -3311,12 +3573,48 @@ ThreeGppChannelModel::RandomRaysCoupling(Ptr<const ThreeGppChannelParams> channe
                                          Double2DVector* rayZodRadian) const
 {
     NS_LOG_FUNCTION(this);
-    for (uint8_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+    if (!m_scDrawCtx.active)
     {
-        Shuffle((*rayAodRadian)[cIndex].begin(), (*rayAodRadian)[cIndex].end(), m_uniformRvShuffle);
-        Shuffle((*rayAoaRadian)[cIndex].begin(), (*rayAoaRadian)[cIndex].end(), m_uniformRvShuffle);
-        Shuffle((*rayZodRadian)[cIndex].begin(), (*rayZodRadian)[cIndex].end(), m_uniformRvShuffle);
-        Shuffle((*rayZoaRadian)[cIndex].begin(), (*rayZoaRadian)[cIndex].end(), m_uniformRvShuffle);
+        for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+        {
+            Shuffle((*rayAodRadian)[cIndex].begin(),
+                    (*rayAodRadian)[cIndex].end(),
+                    m_uniformRvShuffle);
+            Shuffle((*rayAoaRadian)[cIndex].begin(),
+                    (*rayAoaRadian)[cIndex].end(),
+                    m_uniformRvShuffle);
+            Shuffle((*rayZodRadian)[cIndex].begin(),
+                    (*rayZodRadian)[cIndex].end(),
+                    m_uniformRvShuffle);
+            Shuffle((*rayZoaRadian)[cIndex].begin(),
+                    (*rayZoaRadian)[cIndex].end(),
+                    m_uniformRvShuffle);
+        }
+        return;
+    }
+
+    // Spatially-consistent random coupling: permute the rays of each cluster
+    // by sorting per-(cluster, ray) samples of the correlated fields. The
+    // resulting permutation is uniformly distributed at any single position,
+    // and varies slowly and consistently with the terminal position.
+    auto fieldPermute = [this](DoubleVector& rays, uint8_t varClass, uint16_t cIndex) {
+        std::vector<std::pair<double, double>> keyed(rays.size());
+        for (std::size_t m = 0; m < rays.size(); m++)
+        {
+            keyed[m] = {ScNormal(ScFieldVarId(varClass, cIndex, m)), rays[m]};
+        }
+        std::ranges::sort(keyed, {}, &std::pair<double, double>::first);
+        for (std::size_t m = 0; m < rays.size(); m++)
+        {
+            rays[m] = keyed[m].second;
+        }
+    };
+    for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+    {
+        fieldPermute((*rayAodRadian)[cIndex], 5, cIndex);
+        fieldPermute((*rayAoaRadian)[cIndex], 6, cIndex);
+        fieldPermute((*rayZodRadian)[cIndex], 7, cIndex);
+        fieldPermute((*rayZoaRadian)[cIndex], 8, cIndex);
     }
 }
 
@@ -3324,7 +3622,8 @@ void
 ThreeGppChannelModel::GenerateCrossPolPowerRatiosAndInitialPhases(
     Double2DVector* crossPolarizationPowerRatios,
     Double3DVector* clusterPhase,
-    const uint8_t reducedClusterNumber,
+    const uint16_t reducedClusterNumber,
+    const uint8_t raysPerCluster,
     Ptr<const ParamsTable> table3gpp) const
 {
     // a vector containing the cross-polarization power ratios, as defined by 7.5-21
@@ -3334,34 +3633,227 @@ ThreeGppChannelModel::GenerateCrossPolPowerRatiosAndInitialPhases(
     crossPolarizationPowerRatios->clear();
     crossPolarizationPowerRatios->resize(reducedClusterNumber);
 
-    const double uXprLinear = pow(10, table3gpp->m_uXpr / 10.0);     // convert to linear
-    const double sigXprLinear = pow(10, table3gpp->m_sigXpr / 10.0); // convert to linear
-
-    for (uint8_t clusterIndex = 0; clusterIndex < reducedClusterNumber; clusterIndex++)
+    for (uint16_t clusterIndex = 0; clusterIndex < reducedClusterNumber; clusterIndex++)
     {
-        (*clusterPhase)[clusterIndex].resize(table3gpp->m_raysPerCluster);
-        (*crossPolarizationPowerRatios)[clusterIndex].resize(table3gpp->m_raysPerCluster);
-        for (uint8_t rayIndex = 0; rayIndex < table3gpp->m_raysPerCluster; rayIndex++)
+        (*clusterPhase)[clusterIndex].resize(raysPerCluster);
+        (*crossPolarizationPowerRatios)[clusterIndex].resize(raysPerCluster);
+        for (uint8_t rayIndex = 0; rayIndex < raysPerCluster; rayIndex++)
         {
             (*clusterPhase)[clusterIndex][rayIndex].resize(4);
-            // stores the XPR values
+            // Step 9: kappa = 10^(X/10) with X ~ N(mu_XPR, sigma_XPR^2) drawn in dB,
+            // the units of the Table 7.5-6 parameters.
             (*crossPolarizationPowerRatios)[clusterIndex][rayIndex] =
-                std::pow(10, (m_normalRv->GetValue() * sigXprLinear + uXprLinear) / 10.0);
+                std::pow(10,
+                         (ScNormal(ScFieldVarId(9, clusterIndex, rayIndex)) * table3gpp->m_sigXpr +
+                          table3gpp->m_uXpr) /
+                             10.0);
             for (uint8_t polIndex = 0; polIndex < 4; polIndex++)
             {
                 // stores the PHI values
                 (*clusterPhase)[clusterIndex][rayIndex][polIndex] =
-                    m_uniformRv->GetValue(-1 * M_PI, M_PI);
+                    -M_PI +
+                    2 * M_PI * ScUniform01(ScFieldVarId(10 + polIndex, clusterIndex, rayIndex));
             }
         }
     }
 }
 
 void
+ThreeGppChannelModel::ApplyLargeBandwidthRayModeling(Ptr<ThreeGppChannelParams> channelParams,
+                                                     Ptr<const ParamsTable> table3gpp,
+                                                     Ptr<const PhasedArrayModel> antennaA,
+                                                     Ptr<const PhasedArrayModel> antennaB) const
+{
+    NS_LOG_FUNCTION(this);
+    const uint16_t nClusters = channelParams->m_reducedClusterNumber;
+    const double lambda = 3e8 / m_frequency;
+    // Intra-cluster zenith spread of departure, Equation (7.6-7).
+    const double cZSD = 0.375 * std::pow(10.0, table3gpp->m_uLgZSD);
+
+    // Equation (7.6-8): number of rays per cluster resolvable with the simulated
+    // bandwidth (delay resolution) and the array aperture (angle resolution). One
+    // parameter realization serves both link directions, so the aperture is the
+    // per-dimension maximum over the two ends' arrays ("the maximum antenna
+    // aperture", Sec. 7.6.2.1), which is direction-independent and preserves the
+    // channel reciprocity.
+    constexpr double k = 0.5; // "sparseness" parameter
+    double dH = 0.0;          // maximum horizontal aperture of the two arrays in meters
+    double dV = 0.0;          // maximum vertical aperture of the two arrays in meters
+    for (const auto& antenna : {antennaA, antennaB})
+    {
+        const auto [h, v] = antenna ? antenna->GetApertures() : std::pair{0.0, 0.0};
+        dH = std::max(dH, lambda * h);
+        dV = std::max(dV, lambda * v);
+    }
+    const double mT = std::max(std::ceil(4 * k * table3gpp->m_cDS * m_channelBandwidth), 1.0);
+    const double mAod =
+        std::max(std::ceil(4 * k * table3gpp->m_cASD * M_PI * dH / (180.0 * lambda)), 1.0);
+    const double mZod = std::max(std::ceil(4 * k * cZSD * M_PI * dV / (180.0 * lambda)), 1.0);
+    const auto numRays = static_cast<uint8_t>(
+        std::min<double>(std::max(mT * mAod * mZod, 20.0), m_maxRaysPerCluster));
+    const size_t numTaps = static_cast<size_t>(nClusters) * numRays;
+
+    // Per-(cluster, ray) offset angles (7.6-5), in degrees, and ray-relative delays,
+    // drawn from the spatially-correlated fields when the drop-based spatial
+    // consistency is enabled (TR 38.901 Sec. 7.6.3.1, large bandwidth extension).
+    Double2DVector alphaAoa(nClusters, DoubleVector(numRays));
+    Double2DVector alphaAod(nClusters, DoubleVector(numRays));
+    Double2DVector alphaZoa(nClusters, DoubleVector(numRays));
+    Double2DVector alphaZod(nClusters, DoubleVector(numRays));
+    Double2DVector rayDelay(nClusters, DoubleVector(numRays));
+    for (uint16_t n = 0; n < nClusters; n++)
+    {
+        double minDelay = std::numeric_limits<double>::max();
+        for (uint8_t m = 0; m < numRays; m++)
+        {
+            alphaAoa[n][m] = -2 + 4 * ScUniform01(ScFieldVarId(16, n, m));
+            alphaAod[n][m] = -2 + 4 * ScUniform01(ScFieldVarId(17, n, m));
+            alphaZoa[n][m] = -2 + 4 * ScUniform01(ScFieldVarId(18, n, m));
+            alphaZod[n][m] = -2 + 4 * ScUniform01(ScFieldVarId(19, n, m));
+            rayDelay[n][m] = 2 * table3gpp->m_cDS * ScUniform01(ScFieldVarId(20, n, m));
+            minDelay = std::min(minDelay, rayDelay[n][m]);
+        }
+        for (uint8_t m = 0; m < numRays; m++)
+        {
+            rayDelay[n][m] -= minDelay;
+        }
+    }
+
+    // Unequal ray powers, Equation (7.6-6), normalized so the rays of cluster n
+    // sum to the cluster power.
+    Double2DVector rayPower(nClusters, DoubleVector(numRays));
+    for (uint16_t n = 0; n < nClusters; n++)
+    {
+        double sum = 0;
+        for (uint8_t m = 0; m < numRays; m++)
+        {
+            rayPower[n][m] = std::exp(-rayDelay[n][m] / table3gpp->m_cDS) *
+                             std::exp(-M_SQRT2 * std::abs(alphaAoa[n][m]) / table3gpp->m_cASA) *
+                             std::exp(-M_SQRT2 * std::abs(alphaAod[n][m]) / table3gpp->m_cASD) *
+                             std::exp(-M_SQRT2 * std::abs(alphaZoa[n][m]) / table3gpp->m_cZSA) *
+                             std::exp(-M_SQRT2 * std::abs(alphaZod[n][m]) / cZSD);
+            sum += rayPower[n][m];
+        }
+        for (uint8_t m = 0; m < numRays; m++)
+        {
+            rayPower[n][m] *= channelParams->m_clusterPower[n] / sum;
+        }
+    }
+
+    // Cross-polarization power ratios (Step 9) and initial phases (Step 10) for the
+    // recomputed number of rays.
+    GenerateCrossPolPowerRatiosAndInitialPhases(&channelParams->m_crossPolarizationPowerRatios,
+                                                &channelParams->m_clusterPhase,
+                                                nClusters,
+                                                numRays,
+                                                table3gpp);
+
+    // Under LOS, GetNewChannel combines the LOS ray with the first tap (7.5-30):
+    // move the zero-relative-delay ray of the first cluster to ray index 0 so that
+    // combination happens at the cluster delay.
+    if (channelParams->m_losCondition == ChannelCondition::LOS && nClusters > 0)
+    {
+        const auto minIt = std::min_element(rayDelay[0].begin(), rayDelay[0].end());
+        const auto m0 = static_cast<size_t>(std::distance(rayDelay[0].begin(), minIt));
+        if (m0 != 0)
+        {
+            std::swap(rayDelay[0][0], rayDelay[0][m0]);
+            std::swap(rayPower[0][0], rayPower[0][m0]);
+            std::swap(alphaAoa[0][0], alphaAoa[0][m0]);
+            std::swap(alphaAod[0][0], alphaAod[0][m0]);
+            std::swap(alphaZoa[0][0], alphaZoa[0][m0]);
+            std::swap(alphaZod[0][0], alphaZod[0][m0]);
+            std::swap(channelParams->m_crossPolarizationPowerRatios[0][0],
+                      channelParams->m_crossPolarizationPowerRatios[0][m0]);
+            std::swap(channelParams->m_clusterPhase[0][0], channelParams->m_clusterPhase[0][m0]);
+        }
+    }
+
+    // Expand every per-cluster structure to one single-ray tap per (cluster, ray):
+    // Equation (7.6-3) gives each ray its own delay, so the sub-cluster mapping of
+    // Table 7.5-5 is replaced by individually delayed rays.
+    DoubleVector tapDelay(numTaps);
+    DoubleVector tapPower(numTaps);
+    DoubleVector tapAlpha(numTaps);
+    DoubleVector tapD(numTaps);
+    Double2DVector tapAngle(4, DoubleVector(numTaps));
+    Double2DVector tapRayAoa(numTaps, DoubleVector(1));
+    Double2DVector tapRayAod(numTaps, DoubleVector(1));
+    Double2DVector tapRayZoa(numTaps, DoubleVector(1));
+    Double2DVector tapRayZod(numTaps, DoubleVector(1));
+    Double2DVector tapXpr(numTaps, DoubleVector(1));
+    Double3DVector tapPhase(numTaps);
+    const bool expandAttenuation = channelParams->m_attenuation_dB.size() == nClusters;
+    DoubleVector tapAttenuation(expandAttenuation ? numTaps : 0);
+    for (uint16_t n = 0; n < nClusters; n++)
+    {
+        for (uint8_t m = 0; m < numRays; m++)
+        {
+            const size_t tap = static_cast<size_t>(n) * numRays + m;
+            tapDelay[tap] = channelParams->m_delay[n] + rayDelay[n][m];
+            tapPower[tap] = rayPower[n][m];
+            // The scatterer-Doppler terms (an ns-3 extension, not a TR 38.901
+            // step) are drawn per cluster and replicated to the cluster's rays.
+            tapAlpha[tap] = channelParams->m_alpha[n];
+            tapD[tap] = channelParams->m_D[n];
+
+            // Ray angles around the cluster means, Equations (7.5-13), (7.5-18) and
+            // (7.5-20) with the per-ray offsets of (7.6-5).
+            const double tempAoa =
+                channelParams->m_angle[AOA_INDEX][n] + table3gpp->m_cASA * alphaAoa[n][m];
+            const double tempZoa =
+                channelParams->m_angle[ZOA_INDEX][n] + table3gpp->m_cZSA * alphaZoa[n][m];
+            const double tempAod =
+                channelParams->m_angle[AOD_INDEX][n] + table3gpp->m_cASD * alphaAod[n][m];
+            const double tempZod = channelParams->m_angle[ZOD_INDEX][n] + cZSD * alphaZod[n][m];
+            const auto [aoaRad, zoaRad] =
+                WrapAngles(DegreesToRadians(tempAoa), DegreesToRadians(tempZoa));
+            const auto [aodRad, zodRad] =
+                WrapAngles(DegreesToRadians(tempAod), DegreesToRadians(tempZod));
+            tapRayAoa[tap][0] = aoaRad;
+            tapRayZoa[tap][0] = zoaRad;
+            tapRayAod[tap][0] = aodRad;
+            tapRayZod[tap][0] = zodRad;
+            tapAngle[AOA_INDEX][tap] = RadiansToDegrees(aoaRad);
+            tapAngle[ZOA_INDEX][tap] = RadiansToDegrees(zoaRad);
+            tapAngle[AOD_INDEX][tap] = RadiansToDegrees(aodRad);
+            tapAngle[ZOD_INDEX][tap] = RadiansToDegrees(zodRad);
+
+            tapXpr[tap][0] = channelParams->m_crossPolarizationPowerRatios[n][m];
+            tapPhase[tap] = {channelParams->m_clusterPhase[n][m]};
+            if (expandAttenuation)
+            {
+                tapAttenuation[tap] = channelParams->m_attenuation_dB[n];
+            }
+        }
+    }
+
+    channelParams->m_delay = std::move(tapDelay);
+    channelParams->m_clusterPower = std::move(tapPower);
+    channelParams->m_alpha = std::move(tapAlpha);
+    channelParams->m_D = std::move(tapD);
+    channelParams->m_angle = std::move(tapAngle);
+    channelParams->m_rayAoaRadian = std::move(tapRayAoa);
+    channelParams->m_rayAodRadian = std::move(tapRayAod);
+    channelParams->m_rayZoaRadian = std::move(tapRayZoa);
+    channelParams->m_rayZodRadian = std::move(tapRayZod);
+    channelParams->m_crossPolarizationPowerRatios = std::move(tapXpr);
+    channelParams->m_clusterPhase = std::move(tapPhase);
+    if (expandAttenuation)
+    {
+        channelParams->m_attenuation_dB = std::move(tapAttenuation);
+    }
+    channelParams->m_reducedClusterNumber = static_cast<uint16_t>(numTaps);
+    channelParams->m_numRaysPerCluster = 1;
+    channelParams->m_cluster1st = NO_SUBCLUSTERS;
+    channelParams->m_cluster2nd = NO_SUBCLUSTERS;
+}
+
+void
 ThreeGppChannelModel::FindStrongestClusters(Ptr<const ThreeGppChannelParams> channelParams,
                                             Ptr<const ParamsTable> table3gpp,
-                                            uint8_t* cluster1st,
-                                            uint8_t* cluster2nd,
+                                            uint16_t* cluster1st,
+                                            uint16_t* cluster2nd,
                                             DoubleVector* clusterDelay,
                                             Double2DVector* angles,
                                             DoubleVector* alpha,
@@ -3394,7 +3886,7 @@ ThreeGppChannelModel::FindStrongestClusters(Ptr<const ThreeGppChannelParams> cha
     {
         // Find strongest
         double maxPower = channelParams->m_clusterPower[0];
-        for (uint8_t cIndex = 1; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+        for (uint16_t cIndex = 1; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
         {
             if (maxPower < channelParams->m_clusterPower[cIndex])
             {
@@ -3407,7 +3899,7 @@ ThreeGppChannelModel::FindStrongestClusters(Ptr<const ThreeGppChannelParams> cha
         maxPower = channelParams->m_clusterPower[*cluster2nd];
 
         // Find second-strongest (must be != cluster1st)
-        for (uint8_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
+        for (uint16_t cIndex = 0; cIndex < channelParams->m_reducedClusterNumber; cIndex++)
         {
             if (cIndex != *cluster1st && maxPower < channelParams->m_clusterPower[cIndex])
             {
@@ -3442,8 +3934,8 @@ ThreeGppChannelModel::FindStrongestClusters(Ptr<const ThreeGppChannelParams> cha
     }
     else
     {
-        const uint8_t min = std::min(*cluster1st, *cluster2nd);
-        const uint8_t max = std::max(*cluster1st, *cluster2nd);
+        const uint16_t min = std::min(*cluster1st, *cluster2nd);
+        const uint16_t max = std::max(*cluster1st, *cluster2nd);
 
         clusterDelay->push_back((*clusterDelay)[min] + 1.28 * table3gpp->m_cDS);
         clusterDelay->push_back((*clusterDelay)[min] + 2.56 * table3gpp->m_cDS);
@@ -3490,7 +3982,7 @@ ThreeGppChannelModel::FindStrongestClusters(Ptr<const ThreeGppChannelParams> cha
 
 void
 ThreeGppChannelModel::TrimToBaseClusters(
-    const uint8_t reducedClusterNumber,
+    const uint16_t reducedClusterNumber,
     DoubleVector* delay,
     Double2DVector* angles,
     std::vector<std::vector<std::pair<double, double>>>* cachedAngleSincos,
@@ -3580,7 +4072,7 @@ ThreeGppChannelModel::PrecomputeAnglesSinCos(
 }
 
 void
-ThreeGppChannelModel::GenerateDopplerTerms(const uint8_t reducedClusterNumber,
+ThreeGppChannelModel::GenerateDopplerTerms(const uint16_t reducedClusterNumber,
                                            DoubleVector* dopplerTermAlpha,
                                            DoubleVector* dopplerTermD) const
 {
@@ -3588,10 +4080,19 @@ ThreeGppChannelModel::GenerateDopplerTerms(const uint8_t reducedClusterNumber,
     dopplerTermAlpha->assign(reducedClusterNumber, 0.0);
     dopplerTermD->assign(reducedClusterNumber, 0.0);
 
-    for (uint8_t cIndex = 1; cIndex < reducedClusterNumber; ++cIndex)
+    for (uint16_t cIndex = 1; cIndex < reducedClusterNumber; ++cIndex)
     {
-        (*dopplerTermAlpha)[cIndex] = m_uniformRvDoppler->GetValue(-1, 1);
-        (*dopplerTermD)[cIndex] = m_uniformRvDoppler->GetValue(-m_vScatt, m_vScatt);
+        if (m_scDrawCtx.active)
+        {
+            (*dopplerTermAlpha)[cIndex] = -1 + 2 * ScUniform01(ScFieldVarId(14, cIndex, 0));
+            (*dopplerTermD)[cIndex] =
+                m_vScatt * (-1 + 2 * ScUniform01(ScFieldVarId(15, cIndex, 0)));
+        }
+        else
+        {
+            (*dopplerTermAlpha)[cIndex] = m_uniformRvDoppler->GetValue(-1, 1);
+            (*dopplerTermD)[cIndex] = m_uniformRvDoppler->GetValue(-m_vScatt, m_vScatt);
+        }
     }
 }
 
@@ -3687,7 +4188,9 @@ Ptr<ThreeGppChannelModel::ThreeGppChannelParams>
 ThreeGppChannelModel::GenerateChannelParameters(Ptr<const ChannelCondition> channelCondition,
                                                 Ptr<const ParamsTable> table3gpp,
                                                 Ptr<const MobilityModel> aMob,
-                                                Ptr<const MobilityModel> bMob) const
+                                                Ptr<const MobilityModel> bMob,
+                                                Ptr<const PhasedArrayModel> antennaA,
+                                                Ptr<const PhasedArrayModel> antennaB) const
 {
     NS_LOG_FUNCTION(this);
     // Enforce canonical ordering (by node id) for deterministic parameter generation.
@@ -3721,11 +4224,32 @@ ThreeGppChannelModel::GenerateChannelParameters(Ptr<const ChannelCondition> chan
                        &channelParams->m_lastPositionSecond,
                        &channelParams->m_lastRelativePosition2D);
 
-    // Step 4: Generate large-scale parameters. All LSPS are uncorrelated.
-    const LargeScaleParameters lsps = GenerateLSPs(channelParams->m_losCondition, table3gpp);
+    // Step 4: Generate large-scale parameters. LSPs are cross-correlated per the
+    // 3GPP table; when InterUeSpatialConsistency is enabled they are additionally
+    // spatially correlated between links from the same site (TR 38.901 Sec. 7.6.3.1).
+    const auto [siteMob, termMob] =
+        m_channelConditionModel->GetSiteAndTerminal(aMobOrdered, bMobOrdered);
+    const LargeScaleParameters lsps = GenerateLSPs(channelCondition, table3gpp, siteMob, termMob);
 
     channelParams->m_DS = lsps.DS;
     channelParams->m_K_factor = lsps.kFactor;
+
+    if (m_channelConditionModel->IsInterUeSpatialConsistencyEnabled())
+    {
+        // Drop-based spatial consistency (TR 38.901 Sec. 7.6.3.1): route the
+        // cluster and ray specific random draws of steps 5-10 (and of the
+        // Doppler terms) through per-site spatially-correlated fields sampled
+        // at the terminal position, with the correlation distance of Table
+        // 7.6.3.1-2, so links from the same site to nearby terminals obtain
+        // correlated small-scale channel realizations.
+        const bool isO2i = channelCondition->GetO2iCondition() == ChannelCondition::O2I;
+        m_scDrawCtx.active = true;
+        m_scDrawCtx.siteNodeId = siteMob->GetObject<Node>()->GetId();
+        m_scDrawCtx.condSlot =
+            isO2i ? 2 : (channelParams->m_losCondition == ChannelCondition::LOS ? 0 : 1);
+        m_scDrawCtx.termPos = termMob->GetPosition();
+        m_scDrawCtx.corrDist = GetClusterCorrelationDistance(channelParams->m_losCondition, isO2i);
+    }
 
     // Step 5: Generate Delays and normalize them. Save minTau to be used for channel consistency.
     double minTau = 100.0;
@@ -3780,38 +4304,54 @@ ThreeGppChannelModel::GenerateChannelParameters(Ptr<const ChannelCondition> chan
                                     channelParams->m_angle[AOA_INDEX],
                                     channelParams->m_angle[ZOA_INDEX],
                                     table3gpp);
-    // Step 8: Coupling of rays within a cluster for both azimuth and elevation
-    // shuffle all the arrays to perform random coupling
-    // Step a): update per-ray angles around cluster means (no shuffling)
-    ComputeRayAngles(channelParams,
-                     table3gpp,
-                     &channelParams->m_rayAoaRadian,
-                     &channelParams->m_rayAodRadian,
-                     &channelParams->m_rayZoaRadian,
-                     &channelParams->m_rayZodRadian);
+    channelParams->m_numRaysPerCluster = table3gpp->m_raysPerCluster;
+    if (!m_largeBandwidthArrayModeling)
+    {
+        // Step 8: Coupling of rays within a cluster for both azimuth and elevation
+        // shuffle all the arrays to perform random coupling
+        // Step a): update per-ray angles around cluster means (no shuffling)
+        ComputeRayAngles(channelParams,
+                         table3gpp,
+                         &channelParams->m_rayAoaRadian,
+                         &channelParams->m_rayAodRadian,
+                         &channelParams->m_rayZoaRadian,
+                         &channelParams->m_rayZodRadian);
 
-    // Step b): random coupling by shuffling rays within each cluster
-    RandomRaysCoupling(channelParams,
-                       &channelParams->m_rayAoaRadian,
-                       &channelParams->m_rayAodRadian,
-                       &channelParams->m_rayZoaRadian,
-                       &channelParams->m_rayZodRadian);
+        // Step b): random coupling by shuffling rays within each cluster
+        RandomRaysCoupling(channelParams,
+                           &channelParams->m_rayAoaRadian,
+                           &channelParams->m_rayAodRadian,
+                           &channelParams->m_rayZoaRadian,
+                           &channelParams->m_rayZodRadian);
 
-    // Step 9: Generate the cross-polarization power ratios
-    // Step 10: Draw initial phases
-    GenerateCrossPolPowerRatiosAndInitialPhases(&channelParams->m_crossPolarizationPowerRatios,
-                                                &channelParams->m_clusterPhase,
-                                                channelParams->m_reducedClusterNumber,
-                                                table3gpp);
+        // Step 9: Generate the cross-polarization power ratios
+        // Step 10: Draw initial phases
+        GenerateCrossPolPowerRatiosAndInitialPhases(&channelParams->m_crossPolarizationPowerRatios,
+                                                    &channelParams->m_clusterPhase,
+                                                    channelParams->m_reducedClusterNumber,
+                                                    table3gpp->m_raysPerCluster,
+                                                    table3gpp);
+    }
 
     // Generate Doppler terms
     GenerateDopplerTerms(channelParams->m_reducedClusterNumber,
                          &channelParams->m_alpha,
                          &channelParams->m_D);
 
+    if (m_largeBandwidthArrayModeling)
+    {
+        // TR 38.901 Sec. 7.6.2.2: replace the fixed per-ray offsets, the equal ray
+        // powers and the sub-cluster mapping with per-ray uniform offsets, relative
+        // delays and unequal powers, expanding each ray into its own tap. Steps 8-10
+        // are performed inside on the recomputed number of rays; the random coupling
+        // of rays is not applied, since it would break the association between each
+        // ray's offset angles and its power in Equation (7.6-6).
+        ApplyLargeBandwidthRayModeling(channelParams, table3gpp, antennaA, antennaB);
+    }
+
     // save delay consistency for the channel updates with the reduced cluster number
     channelParams->m_delayConsistency = channelParams->m_delay;
-    for (uint8_t cInd = 0; cInd < channelParams->m_reducedClusterNumber; cInd++)
+    for (uint16_t cInd = 0; cInd < channelParams->m_reducedClusterNumber; cInd++)
     {
         // 7.6.3.2, Procedure A, k=0 -> t_0
         if (channelParams->m_losCondition != ChannelCondition::LOS)
@@ -3823,18 +4363,23 @@ ThreeGppChannelModel::GenerateChannelParameters(Ptr<const ChannelCondition> chan
         channelParams->m_delayConsistency[cInd] += channelParams->m_dis3D / 3e8;
     }
 
-    FindStrongestClusters(channelParams,
-                          table3gpp,
-                          &channelParams->m_cluster1st,
-                          &channelParams->m_cluster2nd,
-                          &channelParams->m_delay,
-                          &channelParams->m_angle,
-                          &channelParams->m_alpha,
-                          &channelParams->m_D,
-                          &channelParams->m_clusterPower);
+    if (!m_largeBandwidthArrayModeling)
+    {
+        FindStrongestClusters(channelParams,
+                              table3gpp,
+                              &channelParams->m_cluster1st,
+                              &channelParams->m_cluster2nd,
+                              &channelParams->m_delay,
+                              &channelParams->m_angle,
+                              &channelParams->m_alpha,
+                              &channelParams->m_D,
+                              &channelParams->m_clusterPower);
+    }
 
     // Precompute angles sincos
     PrecomputeAnglesSinCos(channelParams, &channelParams->m_cachedAngleSincos);
+
+    m_scDrawCtx.active = false;
 
     return channelParams;
 }
@@ -3994,29 +4539,16 @@ ThreeGppChannelModel::GetNewChannel(Ptr<const ThreeGppChannelParams> channelPara
         std::make_pair(sAntenna->GetId(),
                        uAntenna->GetId()); // save antenna pair, with the exact order of s and u
 
-    Double2DVector rayAodRadian;
-    Double2DVector rayAoaRadian;
-    Double2DVector rayZodRadian;
-    Double2DVector rayZoaRadian;
-
-    // if channel params is generated in the same direction in which we
-    // generate the channel matrix, angles and zenith od departure and arrival are ok,
-    // just set them to corresponding variable that will be used for the generation
-    // of channel matrix, otherwise we need to flip angles and zeniths of departure and arrival
-    if (isSameDirection)
-    {
-        rayAodRadian = channelParams->m_rayAodRadian;
-        rayAoaRadian = channelParams->m_rayAoaRadian;
-        rayZodRadian = channelParams->m_rayZodRadian;
-        rayZoaRadian = channelParams->m_rayZoaRadian;
-    }
-    else
-    {
-        rayAodRadian = channelParams->m_rayAoaRadian;
-        rayAoaRadian = channelParams->m_rayAodRadian;
-        rayZodRadian = channelParams->m_rayZoaRadian;
-        rayZoaRadian = channelParams->m_rayZodRadian;
-    }
+    // Bind const references to the per-ray angle tables (swapped for the
+    // reverse direction); the coefficient loop below only reads them.
+    const Double2DVector& rayAodRadian =
+        isSameDirection ? channelParams->m_rayAodRadian : channelParams->m_rayAoaRadian;
+    const Double2DVector& rayAoaRadian =
+        isSameDirection ? channelParams->m_rayAoaRadian : channelParams->m_rayAodRadian;
+    const Double2DVector& rayZodRadian =
+        isSameDirection ? channelParams->m_rayZodRadian : channelParams->m_rayZoaRadian;
+    const Double2DVector& rayZoaRadian =
+        isSameDirection ? channelParams->m_rayZoaRadian : channelParams->m_rayZodRadian;
 
     // Step 11: Generate channel coefficients for each cluster n and each receiver
     //  and transmitter element pair u,s.
@@ -4031,6 +4563,12 @@ ThreeGppChannelModel::GetNewChannel(Ptr<const ThreeGppChannelParams> channelPara
     uint16_t numOverallCluster = channelParams->m_cluster1st != channelParams->m_cluster2nd
                                      ? channelParams->m_reducedClusterNumber + 4
                                      : channelParams->m_reducedClusterNumber + 2;
+    if (channelParams->m_cluster1st == NO_SUBCLUSTERS)
+    {
+        // Large bandwidth modeling (TR 38.901 Sec. 7.6.2.2): every tap is a single
+        // individually delayed ray; no sub-clusters are appended.
+        numOverallCluster = channelParams->m_reducedClusterNumber;
+    }
     Complex3DVector hUsn(uSize, sSize, numOverallCluster); // channel coefficient hUsn (u, s, n);
     NS_ASSERT(channelParams->m_reducedClusterNumber <= channelParams->m_clusterPhase.size());
     NS_ASSERT(channelParams->m_reducedClusterNumber <= channelParams->m_clusterPower.size());
@@ -4040,217 +4578,426 @@ ThreeGppChannelModel::GetNewChannel(Ptr<const ThreeGppChannelParams> channelPara
     NS_ASSERT(channelParams->m_reducedClusterNumber <= rayZodRadian.size());
     NS_ASSERT(channelParams->m_reducedClusterNumber <= rayAoaRadian.size());
     NS_ASSERT(channelParams->m_reducedClusterNumber <= rayAodRadian.size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <= channelParams->m_clusterPhase[0].size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <=
-              channelParams->m_crossPolarizationPowerRatios[0].size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <= rayZoaRadian[0].size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <= rayZodRadian[0].size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <= rayAoaRadian[0].size());
-    NS_ASSERT(table3gpp->m_raysPerCluster <= rayAodRadian[0].size());
+    const uint8_t nRays = channelParams->m_numRaysPerCluster != 0
+                              ? channelParams->m_numRaysPerCluster
+                              : table3gpp->m_raysPerCluster;
+    NS_ASSERT(nRays <= channelParams->m_clusterPhase[0].size());
+    NS_ASSERT(nRays <= channelParams->m_crossPolarizationPowerRatios[0].size());
+    NS_ASSERT(nRays <= rayZoaRadian[0].size());
+    NS_ASSERT(nRays <= rayZodRadian[0].size());
+    NS_ASSERT(nRays <= rayAoaRadian[0].size());
+    NS_ASSERT(nRays <= rayAodRadian[0].size());
 
     double distance3D = channelParams->m_dis3D;
 
     Angles sAngle(uMob->GetPosition(), sMob->GetPosition());
     Angles uAngle(sMob->GetPosition(), uMob->GetPosition());
 
-    Double2DVector sinCosA; // cached multiplications of sin and cos of the ZoA and AoA angles
-    Double2DVector sinSinA; // cached multiplications of sines of the ZoA and AoA angles
-    Double2DVector cosZoA;  // cached cos of the ZoA angle
-    Double2DVector sinCosD; // cached multiplications of sin and cos of the ZoD and AoD angles
-    Double2DVector sinSinD; // cached multiplications of the cosines of the ZoA and AoA angles
-    Double2DVector cosZoD;  // cached cos of the ZoD angle
+    // Flatten the per-(cluster, ray) angle sin/cos caches into contiguous
+    // std::vector<double> in row-major [cluster][ray] order (index =
+    // cluster*nRays + ray), avoiding the per-row allocations of a Double2DVector.
+    const uint16_t nClusters = channelParams->m_reducedClusterNumber;
+    const size_t nm = static_cast<size_t>(nClusters) * nRays;
+    std::vector<double> sinCosA(nm);
+    std::vector<double> sinSinA(nm);
+    std::vector<double> cosZoA(nm);
+    std::vector<double> sinCosD(nm);
+    std::vector<double> sinSinD(nm);
+    std::vector<double> cosZoD(nm);
 
-    // contains part of the ray expression, cached as independent from the u- and s-indexes,
-    // but calculate it for different polarization angles of s and u
-    std::map<std::pair<uint8_t, uint8_t>, Complex2DVector> raysPreComp;
-    for (size_t polSa = 0; polSa < sAntenna->GetNumPols(); ++polSa)
+    // Hold the per-(polS, polU) precomputed ray matrices in a fixed 2x2 array
+    // (at most two polarizations per side) instead of a std::map, so the inner
+    // (s, u, n, m) loop indexes directly rather than doing a map lookup per cell.
+    const auto numPolS = sAntenna->GetNumPols();
+    const auto numPolU = uAntenna->GetNumPols();
+    NS_ASSERT_MSG(numPolS <= 2 && numPolU <= 2,
+                  "raysPreComp lookup table assumes at most 2 polarizations");
+    Complex2DVector raysPreComp[2][2];
+    for (uint8_t pS = 0; pS < numPolS; ++pS)
     {
-        for (size_t polUa = 0; polUa < uAntenna->GetNumPols(); ++polUa)
+        for (uint8_t pU = 0; pU < numPolU; ++pU)
         {
-            raysPreComp[std::make_pair(polSa, polUa)] =
-                Complex2DVector(channelParams->m_reducedClusterNumber, table3gpp->m_raysPerCluster);
+            raysPreComp[pS][pU] = Complex2DVector(nClusters, nRays);
         }
     }
 
-    // resize to appropriate dimensions
-    sinCosA.resize(channelParams->m_reducedClusterNumber);
-    sinSinA.resize(channelParams->m_reducedClusterNumber);
-    cosZoA.resize(channelParams->m_reducedClusterNumber);
-    sinCosD.resize(channelParams->m_reducedClusterNumber);
-    sinSinD.resize(channelParams->m_reducedClusterNumber);
-    cosZoD.resize(channelParams->m_reducedClusterNumber);
-    for (uint8_t nIndex = 0; nIndex < channelParams->m_reducedClusterNumber; nIndex++)
+    // Pre-compute the (n,m) terms that are independent of (u,s,polarization).
+    // Polarisation-dependent precomp lives in raysPreComp[pS][pU](n,m).
+    for (uint16_t nIndex = 0; nIndex < nClusters; nIndex++)
     {
-        sinCosA[nIndex].resize(table3gpp->m_raysPerCluster);
-        sinSinA[nIndex].resize(table3gpp->m_raysPerCluster);
-        cosZoA[nIndex].resize(table3gpp->m_raysPerCluster);
-        sinCosD[nIndex].resize(table3gpp->m_raysPerCluster);
-        sinSinD[nIndex].resize(table3gpp->m_raysPerCluster);
-        cosZoD[nIndex].resize(table3gpp->m_raysPerCluster);
-    }
-    // pre-compute the terms which are independent from uIndex and sIndex
-    for (uint8_t nIndex = 0; nIndex < channelParams->m_reducedClusterNumber; nIndex++)
-    {
-        for (uint8_t mIndex = 0; mIndex < table3gpp->m_raysPerCluster; mIndex++)
+        for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
         {
-            DoubleVector initialPhase = channelParams->m_clusterPhase[nIndex][mIndex];
+            const size_t idx = static_cast<size_t>(nIndex) * nRays + mIndex;
+            // Reference (not copy) to avoid a heap allocation per ray.
+            const DoubleVector& initialPhase = channelParams->m_clusterPhase[nIndex][mIndex];
             NS_ASSERT(4 <= initialPhase.size());
-            double k = channelParams->m_crossPolarizationPowerRatios[nIndex][mIndex];
+            const double k = channelParams->m_crossPolarizationPowerRatios[nIndex][mIndex];
+            const double sqrtInvK = std::sqrt(1.0 / k);
 
-            // cache the component of the "rays" terms which depend on the random angle of arrivals
-            // and departures and initial phases only
-            for (uint8_t polUa = 0; polUa < uAntenna->GetNumPols(); ++polUa)
+            // std::polar(1, x) folds the cos+sin call to a single sincos
+            // on modern libstdc++/libc++.
+            const std::complex<double> ph0 = std::polar(1.0, initialPhase[0]);
+            const std::complex<double> ph1 = std::polar(1.0, initialPhase[1]) * sqrtInvK;
+            const std::complex<double> ph2 = std::polar(1.0, initialPhase[2]) * sqrtInvK;
+            const std::complex<double> ph3 = std::polar(1.0, initialPhase[3]);
+
+            const double rxAoa = rayAoaRadian[nIndex][mIndex];
+            const double rxZoa = rayZoaRadian[nIndex][mIndex];
+            const double txAod = rayAodRadian[nIndex][mIndex];
+            const double txZod = rayZodRadian[nIndex][mIndex];
+
+            for (uint8_t polUa = 0; polUa < numPolU; ++polUa)
             {
-                auto [rxFieldPatternPhi, rxFieldPatternTheta] = uAntenna->GetElementFieldPattern(
-                    Angles(channelParams->m_rayAoaRadian[nIndex][mIndex],
-                           channelParams->m_rayZoaRadian[nIndex][mIndex]),
-                    polUa);
-                for (uint8_t polSa = 0; polSa < sAntenna->GetNumPols(); ++polSa)
+                auto [rxPhi, rxTheta] =
+                    uAntenna->GetElementFieldPattern(Angles(rxAoa, rxZoa), polUa);
+                for (uint8_t polSa = 0; polSa < numPolS; ++polSa)
                 {
-                    auto [txFieldPatternPhi, txFieldPatternTheta] =
-                        sAntenna->GetElementFieldPattern(
-                            Angles(channelParams->m_rayAodRadian[nIndex][mIndex],
-                                   channelParams->m_rayZodRadian[nIndex][mIndex]),
-                            polSa);
-                    raysPreComp[std::make_pair(polSa, polUa)](nIndex, mIndex) =
-                        std::complex(cos(initialPhase[0]), sin(initialPhase[0])) *
-                            rxFieldPatternTheta * txFieldPatternTheta +
-                        std::complex(cos(initialPhase[1]), sin(initialPhase[1])) *
-                            std::sqrt(1.0 / k) * rxFieldPatternTheta * txFieldPatternPhi +
-                        std::complex(cos(initialPhase[2]), sin(initialPhase[2])) *
-                            std::sqrt(1.0 / k) * rxFieldPatternPhi * txFieldPatternTheta +
-                        std::complex(cos(initialPhase[3]), sin(initialPhase[3])) *
-                            rxFieldPatternPhi * txFieldPatternPhi;
+                    auto [txPhi, txTheta] =
+                        sAntenna->GetElementFieldPattern(Angles(txAod, txZod), polSa);
+                    raysPreComp[polSa][polUa](nIndex, mIndex) =
+                        ph0 * rxTheta * txTheta + ph1 * rxTheta * txPhi + ph2 * rxPhi * txTheta +
+                        ph3 * rxPhi * txPhi;
                 }
             }
 
-            // cache the component of the "rxPhaseDiff" terms which depend on the random angle of
-            // arrivals only
-            double sinRayZoa = sin(rayZoaRadian[nIndex][mIndex]);
-            double sinRayAoa = sin(rayAoaRadian[nIndex][mIndex]);
-            double cosRayAoa = cos(rayAoaRadian[nIndex][mIndex]);
-            sinCosA[nIndex][mIndex] = sinRayZoa * cosRayAoa;
-            sinSinA[nIndex][mIndex] = sinRayZoa * sinRayAoa;
-            cosZoA[nIndex][mIndex] = cos(rayZoaRadian[nIndex][mIndex]);
+            // Cache the components of the "rxPhaseDiff" and "txPhaseDiff"
+            // terms, which depend on the random angles of arrival and
+            // departure only, for the steering-phase math further below.
+            const double sinZoa = std::sin(rayZoaRadian[nIndex][mIndex]);
+            const double sinAoa = std::sin(rayAoaRadian[nIndex][mIndex]);
+            const double cosAoa = std::cos(rayAoaRadian[nIndex][mIndex]);
+            sinCosA[idx] = sinZoa * cosAoa;
+            sinSinA[idx] = sinZoa * sinAoa;
+            cosZoA[idx] = std::cos(rayZoaRadian[nIndex][mIndex]);
 
-            // cache the component of the "txPhaseDiff" terms which depend on the random angle of
-            // departure only
-            double sinRayZod = sin(rayZodRadian[nIndex][mIndex]);
-            double sinRayAod = sin(rayAodRadian[nIndex][mIndex]);
-            double cosRayAod = cos(rayAodRadian[nIndex][mIndex]);
-            sinCosD[nIndex][mIndex] = sinRayZod * cosRayAod;
-            sinSinD[nIndex][mIndex] = sinRayZod * sinRayAod;
-            cosZoD[nIndex][mIndex] = cos(rayZodRadian[nIndex][mIndex]);
+            const double sinZod = std::sin(rayZodRadian[nIndex][mIndex]);
+            const double sinAod = std::sin(rayAodRadian[nIndex][mIndex]);
+            const double cosAod = std::cos(rayAodRadian[nIndex][mIndex]);
+            sinCosD[idx] = sinZod * cosAod;
+            sinSinD[idx] = sinZod * sinAod;
+            cosZoD[idx] = std::cos(rayZodRadian[nIndex][mIndex]);
         }
     }
 
-    // The following for loops computes the channel coefficients
-    // Keeps track of how many sub-clusters have been added up to now
-    uint8_t numSubClustersAdded = 0;
-    for (uint8_t nIndex = 0; nIndex < channelParams->m_reducedClusterNumber; nIndex++)
+    // Cache element locations and polarizations so the (s, u) coefficient loops
+    // below index plain vectors instead of calling the antenna accessors on
+    // every iteration.
+    std::vector<Vector> uLocs(uSize);
+    std::vector<Vector> sLocs(sSize);
+    std::vector<uint8_t> uPols(uSize);
+    std::vector<uint8_t> sPols(sSize);
+    for (size_t i = 0; i < uSize; ++i)
     {
+        uLocs[i] = uAntenna->GetElementLocation(i);
+        uPols[i] = uAntenna->GetElemPol(i);
+    }
+    for (size_t i = 0; i < sSize; ++i)
+    {
+        sLocs[i] = sAntenna->GetElementLocation(i);
+        sPols[i] = sAntenna->GetElemPol(i);
+    }
+
+    // The rx-side rotation exp(j*rxArg) depends only on (cluster, uIndex, ray),
+    // and its product with raysPreComp(n, m) does not depend on sIndex, so both
+    // are hoisted out of the sIndex loop: for each (cluster, uIndex) the product
+    // is folded into this per-ray scratch for every possible tx polarization,
+    // leaving the innermost loop as rays += rxPre[m] * exp(j*txArg).
+    // The scratch is split into real/imag halves so that the innermost ray loop
+    // is plain double arithmetic: it stays fast in unoptimized (-O0) builds and
+    // avoids the NaN-recovery branches of std::complex operator*.
+    std::array<std::vector<double>, 2> rxPreRe{std::vector<double>(nRays),
+                                               std::vector<double>(nRays)};
+    std::array<std::vector<double>, 2> rxPreIm{std::vector<double>(nRays),
+                                               std::vector<double>(nRays)};
+
+    // The tx-side rotation exp(j*txArg) depends only on (cluster, sIndex, ray),
+    // not on the rx element, so it is precomputed once per cluster into a flat
+    // [sIndex * nRays + ray] table, also split into real (cos) and imag (sin)
+    // halves, that the (u, s, m) loops below read by index.
+    std::vector<double> txRotRe(sSize * nRays);
+    std::vector<double> txRotIm(sSize * nRays);
+
+    // Cluster-power normalisation factor: clusterPower changes per
+    // cluster but is constant across (u,s,m). Hoist sqrt out of the
+    // inner loop.
+    std::vector<double> clusterScale(nClusters);
+    const double invNRays = 1.0 / static_cast<double>(nRays);
+    for (uint16_t n = 0; n < nClusters; ++n)
+    {
+        clusterScale[n] = std::sqrt(channelParams->m_clusterPower[n] * invNRays);
+    }
+
+    // Separable tx-side steering vector. For a uniform planar array the element
+    // positions lie on an affine 2D lattice,
+    //
+    //   sLoc[s] = elemOrigin + row(s) * rowSpacing + col(s) * colSpacing,
+    //
+    // so the tx steering phase of ray m factors as
+    //
+    //   txArg(s, m) = 2*pi * d_m . sLoc[s]
+    //               = baseArg_m + row(s) * rowArg_m + col(s) * colArg_m,
+    //
+    // and exp(j*txArg) is the product of three phasors that only require
+    // (1 + numRows + numCols) sincos calls per ray instead of one per element.
+    // The result is identical to the per-element path up to floating point
+    // reassociation. The lattice is derived from the first row/column spacings
+    // and verified against every element below; arrays whose elements do not
+    // sit on a regular grid simply fall back to the per-element sincos path.
+    const size_t sNumCols = sAntenna->GetNumColumns();
+    const size_t sNumRows = sAntenna->GetNumRows();
+    // Cross-polarized elements are co-located, so several elements may share
+    // one grid position.
+    const size_t sNumPositions = sNumRows * sNumCols;
+    bool useSeparableTxSteering = (sNumPositions > 0) && (sSize % sNumPositions == 0);
+    Vector elemOrigin(0, 0, 0);
+    Vector rowSpacing(0, 0, 0);
+    Vector colSpacing(0, 0, 0);
+    std::vector<uint16_t> sRowIdx(sSize, 0); // grid row of tx element s
+    std::vector<uint16_t> sColIdx(sSize, 0); // grid column of tx element s
+    if (useSeparableTxSteering)
+    {
+        elemOrigin = sLocs[0];
+        if (sNumCols >= 2)
+        {
+            colSpacing = sLocs[1] - sLocs[0];
+        }
+        if (sNumRows >= 2 && sSize > sNumCols)
+        {
+            rowSpacing = sLocs[sNumCols] - sLocs[0];
+        }
+        const double tolerance = 1e-9 * (1.0 + rowSpacing.GetLength() + colSpacing.GetLength());
+        for (size_t s = 0; s < sSize; ++s)
+        {
+            // Elements are laid out position-major: co-located elements of the
+            // second polarization repeat the same row/column walk.
+            const size_t position = s % sNumPositions;
+            const auto col = static_cast<uint16_t>(position % sNumCols);
+            const auto row = static_cast<uint16_t>(position / sNumCols);
+            sColIdx[s] = col;
+            sRowIdx[s] = row;
+            const Vector predicted(elemOrigin.x + row * rowSpacing.x + col * colSpacing.x,
+                                   elemOrigin.y + row * rowSpacing.y + col * colSpacing.y,
+                                   elemOrigin.z + row * rowSpacing.z + col * colSpacing.z);
+            const Vector mismatch = sLocs[s] - predicted;
+            if (std::abs(mismatch.x) + std::abs(mismatch.y) + std::abs(mismatch.z) > tolerance)
+            {
+                useSeparableTxSteering = false;
+                break;
+            }
+        }
+    }
+    // Per-cluster phasor tables for the separable path, reused across clusters:
+    // rowPhasor[r * nRays + m] = exp(j * r * rowArg_m), and similarly for the
+    // columns and the per-ray base phasor.
+    std::vector<double> rowPhasorRe(useSeparableTxSteering ? sNumRows * nRays : 0);
+    std::vector<double> rowPhasorIm(useSeparableTxSteering ? sNumRows * nRays : 0);
+    std::vector<double> colPhasorRe(useSeparableTxSteering ? sNumCols * nRays : 0);
+    std::vector<double> colPhasorIm(useSeparableTxSteering ? sNumCols * nRays : 0);
+    std::vector<double> basePhasorRe(useSeparableTxSteering ? nRays : 0);
+    std::vector<double> basePhasorIm(useSeparableTxSteering ? nRays : 0);
+
+    // Fill txRotRe/txRotIm with exp(j*txArg) for every (s, ray) of the cluster
+    // whose ray angle caches start at nmBase, using the separable lattice
+    // factorization described above.
+    auto fillTxRotationSeparable = [&](size_t nmBase) {
+        // First build the base, row and column phasor tables:
+        // (1 + sNumRows + sNumCols) * nRays sincos calls.
+        for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
+        {
+            const size_t idx = nmBase + mIndex;
+            // Unit vector of the ray's departure direction.
+            const double dx = sinCosD[idx];
+            const double dy = sinSinD[idx];
+            const double dz = cosZoD[idx];
+            const double baseArg =
+                2.0 * M_PI * (dx * elemOrigin.x + dy * elemOrigin.y + dz * elemOrigin.z);
+            const double rowArg =
+                2.0 * M_PI * (dx * rowSpacing.x + dy * rowSpacing.y + dz * rowSpacing.z);
+            const double colArg =
+                2.0 * M_PI * (dx * colSpacing.x + dy * colSpacing.y + dz * colSpacing.z);
+            basePhasorRe[mIndex] = std::cos(baseArg);
+            basePhasorIm[mIndex] = std::sin(baseArg);
+            for (size_t r = 0; r < sNumRows; ++r)
+            {
+                rowPhasorRe[r * nRays + mIndex] = std::cos(r * rowArg);
+                rowPhasorIm[r * nRays + mIndex] = std::sin(r * rowArg);
+            }
+            for (size_t c = 0; c < sNumCols; ++c)
+            {
+                colPhasorRe[c * nRays + mIndex] = std::cos(c * colArg);
+                colPhasorIm[c * nRays + mIndex] = std::sin(c * colArg);
+            }
+        }
+        // Then reconstruct txRot[s][m] = basePhasor * rowPhasor * colPhasor
+        // with two complex multiplies per (s, ray) and no further trig.
+        for (size_t sIndex = 0; sIndex < sSize; ++sIndex)
+        {
+            const size_t sBase = sIndex * nRays;
+            const size_t rowOffset = static_cast<size_t>(sRowIdx[sIndex]) * nRays;
+            const size_t colOffset = static_cast<size_t>(sColIdx[sIndex]) * nRays;
+            for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
+            {
+                // baseRow = basePhasor * rowPhasor
+                const double baseRowRe = basePhasorRe[mIndex] * rowPhasorRe[rowOffset + mIndex] -
+                                         basePhasorIm[mIndex] * rowPhasorIm[rowOffset + mIndex];
+                const double baseRowIm = basePhasorRe[mIndex] * rowPhasorIm[rowOffset + mIndex] +
+                                         basePhasorIm[mIndex] * rowPhasorRe[rowOffset + mIndex];
+                // txRot = baseRow * colPhasor
+                const double colRe = colPhasorRe[colOffset + mIndex];
+                const double colIm = colPhasorIm[colOffset + mIndex];
+                txRotRe[sBase + mIndex] = baseRowRe * colRe - baseRowIm * colIm;
+                txRotIm[sBase + mIndex] = baseRowRe * colIm + baseRowIm * colRe;
+            }
+        }
+    };
+
+    // Reference path for irregular arrays: one sincos per (element, ray).
+    auto fillTxRotationPerElement = [&](size_t nmBase) {
+        for (size_t sIndex = 0; sIndex < sSize; sIndex++)
+        {
+            const Vector& sLoc = sLocs[sIndex];
+            const size_t sBase = sIndex * nRays;
+            for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
+            {
+                const size_t idx = nmBase + mIndex;
+                const double txArg =
+                    2.0 * M_PI *
+                    (sinCosD[idx] * sLoc.x + sinSinD[idx] * sLoc.y + cosZoD[idx] * sLoc.z);
+                txRotRe[sBase + mIndex] = std::cos(txArg);
+                txRotIm[sBase + mIndex] = std::sin(txArg);
+            }
+        }
+    };
+
+    // The following for loops computes the channel coefficients.
+    // Keeps track of how many sub-clusters have been added up to now.
+    uint8_t numSubClustersAdded = 0;
+    for (uint16_t nIndex = 0; nIndex < nClusters; nIndex++)
+    {
+        const bool isStrongest =
+            nIndex == channelParams->m_cluster1st || nIndex == channelParams->m_cluster2nd;
+        const size_t nmBase = static_cast<size_t>(nIndex) * nRays;
+        const double scale = clusterScale[nIndex];
+
+        // Precompute the tx-side rotation exp(j*txArg) for every (s, ray) of
+        // this cluster, once (see the txRot / separable-steering notes above).
+        if (useSeparableTxSteering)
+        {
+            fillTxRotationSeparable(nmBase);
+        }
+        else
+        {
+            fillTxRotationPerElement(nmBase);
+        }
+
         for (size_t uIndex = 0; uIndex < uSize; uIndex++)
         {
-            Vector uLoc = uAntenna->GetElementLocation(uIndex);
+            const Vector& uLoc = uLocs[uIndex];
+            const uint8_t polU = uPols[uIndex];
+
+            // Fold the rx-side rotation exp(j*rxArg) of this (cluster, u)
+            // into raysPreComp, for each possible tx polarization, so the
+            // sIndex loop below saves one complex multiply per (s, ray).
+            for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
+            {
+                const size_t idx = nmBase + mIndex;
+                const double rxArg =
+                    2.0 * M_PI *
+                    (sinCosA[idx] * uLoc.x + sinSinA[idx] * uLoc.y + cosZoA[idx] * uLoc.z);
+                const std::complex<double> rxRot = std::polar(1.0, rxArg);
+                for (uint8_t pS = 0; pS < numPolS; ++pS)
+                {
+                    const std::complex<double> pre = raysPreComp[pS][polU](nIndex, mIndex) * rxRot;
+                    rxPreRe[pS][mIndex] = pre.real();
+                    rxPreIm[pS][mIndex] = pre.imag();
+                }
+            }
 
             for (size_t sIndex = 0; sIndex < sSize; sIndex++)
             {
-                Vector sLoc = sAntenna->GetElementLocation(sIndex);
-                // Compute the N-2 weakest cluster, assuming 0 slant angle and a
-                // polarization slant angle configured in the array (7.5-22)
-                if (nIndex != channelParams->m_cluster1st && nIndex != channelParams->m_cluster2nd)
-                {
-                    std::complex<double> rays(0, 0);
-                    for (uint8_t mIndex = 0; mIndex < table3gpp->m_raysPerCluster; mIndex++)
-                    {
-                        // lambda_0 is accounted in the antenna spacing uLoc and sLoc.
-                        double rxPhaseDiff =
-                            2 * M_PI *
-                            (sinCosA[nIndex][mIndex] * uLoc.x + sinSinA[nIndex][mIndex] * uLoc.y +
-                             cosZoA[nIndex][mIndex] * uLoc.z);
+                // All the per-element math has been precomputed: the ray sums
+                // below only combine the rx-side scratch (rxPre, includes the
+                // field patterns, initial phases and rx steering) with the
+                // tx-side steering table (txRot).
+                const uint8_t polS = sPols[sIndex];
+                const double* preRe = rxPreRe[polS].data();
+                const double* preIm = rxPreIm[polS].data();
+                const double* txRe = &txRotRe[sIndex * nRays];
+                const double* txIm = &txRotIm[sIndex * nRays];
 
-                        double txPhaseDiff =
-                            2 * M_PI *
-                            (sinCosD[nIndex][mIndex] * sLoc.x + sinSinD[nIndex][mIndex] * sLoc.y +
-                             cosZoD[nIndex][mIndex] * sLoc.z);
-                        // NOTE Doppler is computed in the CalcBeamformingGain function and is
-                        // simplified to only account for the center angle of each cluster.
-                        rays += raysPreComp[std::make_pair(sAntenna->GetElemPol(sIndex),
-                                                           uAntenna->GetElemPol(uIndex))](nIndex,
-                                                                                          mIndex) *
-                                std::complex(cos(rxPhaseDiff), sin(rxPhaseDiff)) *
-                                std::complex(cos(txPhaseDiff), sin(txPhaseDiff));
+                if (!isStrongest)
+                {
+                    // Compute the N-2 weakest clusters, assuming 0 slant angle and a
+                    // polarization slant angle configured in the array (7.5-22).
+                    // NOTE Doppler is computed in CalcBeamformingGain and is
+                    // simplified to only account for the center angle of each cluster.
+                    double raysRe = 0.0;
+                    double raysIm = 0.0;
+                    for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
+                    {
+                        // rays += rxPre[m] * txRot[m], written out on the
+                        // split re/im arrays.
+                        raysRe += preRe[mIndex] * txRe[mIndex] - preIm[mIndex] * txIm[mIndex];
+                        raysIm += preRe[mIndex] * txIm[mIndex] + preIm[mIndex] * txRe[mIndex];
                     }
-                    rays *=
-                        sqrt(channelParams->m_clusterPower[nIndex] / table3gpp->m_raysPerCluster);
-                    hUsn(uIndex, sIndex, nIndex) = rays;
+                    hUsn(uIndex, sIndex, nIndex) =
+                        std::complex<double>(raysRe * scale, raysIm * scale);
                 }
-                else //(7.5-28)
+                else
                 {
-                    std::complex<double> raysSub1(0, 0);
-                    std::complex<double> raysSub2(0, 0);
-                    std::complex<double> raysSub3(0, 0);
-
-                    for (uint8_t mIndex = 0; mIndex < table3gpp->m_raysPerCluster; mIndex++)
+                    // The two strongest clusters are split into 3 sub-clusters
+                    // with a fixed ray-to-subcluster assignment (7.5-28).
+                    double sub1Re = 0.0;
+                    double sub1Im = 0.0;
+                    double sub2Re = 0.0;
+                    double sub2Im = 0.0;
+                    double sub3Re = 0.0;
+                    double sub3Im = 0.0;
+                    for (uint8_t mIndex = 0; mIndex < nRays; mIndex++)
                     {
-                        // ZML:Just remind me that the angle offsets for the 3 subclusters were not
-                        // generated correctly.
-                        double rxPhaseDiff =
-                            2 * M_PI *
-                            (sinCosA[nIndex][mIndex] * uLoc.x + sinSinA[nIndex][mIndex] * uLoc.y +
-                             cosZoA[nIndex][mIndex] * uLoc.z);
+                        // ray = rxPre[m] * txRot[m], as in the branch above.
+                        const double rayRe =
+                            preRe[mIndex] * txRe[mIndex] - preIm[mIndex] * txIm[mIndex];
+                        const double rayIm =
+                            preRe[mIndex] * txIm[mIndex] + preIm[mIndex] * txRe[mIndex];
 
-                        double txPhaseDiff =
-                            2 * M_PI *
-                            (sinCosD[nIndex][mIndex] * sLoc.x + sinSinD[nIndex][mIndex] * sLoc.y +
-                             cosZoD[nIndex][mIndex] * sLoc.z);
-
-                        std::complex<double> raySub =
-                            raysPreComp[std::make_pair(sAntenna->GetElemPol(sIndex),
-                                                       uAntenna->GetElemPol(uIndex))](nIndex,
-                                                                                      mIndex) *
-                            std::complex(cos(rxPhaseDiff), sin(rxPhaseDiff)) *
-                            std::complex(cos(txPhaseDiff), sin(txPhaseDiff));
-
+                        // Table 7.5-5 numbers rays 1-20; mIndex is 0-based, so
+                        // sub-cluster 2 holds rays 9-12,17,18 (mIndex 8-11,16,17)
+                        // and sub-cluster 3 rays 13-16 (mIndex 12-15).
                         switch (mIndex)
                         {
+                        case 8:
                         case 9:
                         case 10:
                         case 11:
-                        case 12:
+                        case 16:
                         case 17:
-                        case 18:
-                            raysSub2 += raySub;
+                            sub2Re += rayRe;
+                            sub2Im += rayIm;
                             break;
+                        case 12:
                         case 13:
                         case 14:
                         case 15:
-                        case 16:
-                            raysSub3 += raySub;
+                            sub3Re += rayRe;
+                            sub3Im += rayIm;
                             break;
-                        default: // case 1,2,3,4,5,6,7,8,19,20
-                            raysSub1 += raySub;
+                        default: // rays 1-8,19,20 (mIndex 0-7,18,19)
+                            sub1Re += rayRe;
+                            sub1Im += rayIm;
                             break;
                         }
                     }
-                    raysSub1 *=
-                        sqrt(channelParams->m_clusterPower[nIndex] / table3gpp->m_raysPerCluster);
-                    raysSub2 *=
-                        sqrt(channelParams->m_clusterPower[nIndex] / table3gpp->m_raysPerCluster);
-                    raysSub3 *=
-                        sqrt(channelParams->m_clusterPower[nIndex] / table3gpp->m_raysPerCluster);
-                    hUsn(uIndex, sIndex, nIndex) = raysSub1;
-                    hUsn(uIndex,
-                         sIndex,
-                         channelParams->m_reducedClusterNumber + numSubClustersAdded) = raysSub2;
-                    hUsn(uIndex,
-                         sIndex,
-                         channelParams->m_reducedClusterNumber + numSubClustersAdded + 1) =
-                        raysSub3;
+                    hUsn(uIndex, sIndex, nIndex) =
+                        std::complex<double>(sub1Re * scale, sub1Im * scale);
+                    hUsn(uIndex, sIndex, nClusters + numSubClustersAdded) =
+                        std::complex<double>(sub2Re * scale, sub2Im * scale);
+                    hUsn(uIndex, sIndex, nClusters + numSubClustersAdded + 1) =
+                        std::complex<double>(sub3Re * scale, sub3Im * scale);
                 }
             }
         }
-        if (nIndex == channelParams->m_cluster1st || nIndex == channelParams->m_cluster2nd)
+        if (isStrongest)
         {
             numSubClustersAdded += 2;
         }
@@ -4258,87 +5005,137 @@ ThreeGppChannelModel::GetNewChannel(Ptr<const ThreeGppChannelParams> channelPara
 
     if (channelParams->m_losCondition == ChannelCondition::LOS) //(7.5-29) && (7.5-30)
     {
-        double lambda = 3.0e8 / m_frequency; // the wavelength of the carrier frequency
-        std::complex phaseDiffDueToDistance(cos(-2 * M_PI * distance3D / lambda),
-                                            sin(-2 * M_PI * distance3D / lambda));
+        // Precompute the per-link LOS constants once, outside the (u, s) loops:
+        // the Ricean K-factor weights, the distance phase term, and the field
+        // patterns for the single LOS ray direction (uAngle, sAngle), which is
+        // shared by all elements of a panel.
+        const double lambda = 3.0e8 / m_frequency;
+        const std::complex<double> phaseDiffDueToDistance =
+            std::polar(1.0, -2.0 * M_PI * distance3D / lambda);
 
-        const double sinUAngleIncl = sin(uAngle.GetInclination());
-        const double cosUAngleIncl = cos(uAngle.GetInclination());
-        const double sinUAngleAz = sin(uAngle.GetAzimuth());
-        const double cosUAngleAz = cos(uAngle.GetAzimuth());
-        const double sinSAngleIncl = sin(sAngle.GetInclination());
-        const double cosSAngleIncl = cos(sAngle.GetInclination());
-        const double sinSAngleAz = sin(sAngle.GetAzimuth());
-        const double cosSAngleAz = cos(sAngle.GetAzimuth());
+        const double sinUAngleIncl = std::sin(uAngle.GetInclination());
+        const double cosUAngleIncl = std::cos(uAngle.GetInclination());
+        const double sinUAngleAz = std::sin(uAngle.GetAzimuth());
+        const double cosUAngleAz = std::cos(uAngle.GetAzimuth());
+        const double sinSAngleIncl = std::sin(sAngle.GetInclination());
+        const double cosSAngleIncl = std::cos(sAngle.GetInclination());
+        const double sinSAngleAz = std::sin(sAngle.GetAzimuth());
+        const double cosSAngleAz = std::cos(sAngle.GetAzimuth());
 
+        // Ricean weighting of (7.5-30): the NLOS coefficients are scaled by
+        // sqrt(1/(K+1)) and the LOS ray by sqrt(K/(K+1)). The LOS ray is
+        // additionally attenuated if blockage is enabled. With LosRayOnly,
+        // the stochastic clusters are absent and the K-factor goes to
+        // infinity; the LOS ray carries unit power.
+        const double kLinear = std::pow(10.0, channelParams->m_K_factor / 10.0);
+        double nlosScale;
+        double losScale;
+        if (m_losRayOnly)
+        {
+            nlosScale = 0.0;
+            losScale = 1.0;
+        }
+        else
+        {
+            nlosScale = std::sqrt(1.0 / (kLinear + 1.0));
+            losScale = std::sqrt(kLinear / (1.0 + kLinear));
+        }
+        // losScale is an amplitude (the sqrt(KR/(KR+1)) factor of (7.5-30)):
+        // the blockage attenuation of TR 38.901 Sec. 7.6.4 reduces the ray
+        // power, so it enters the amplitude through a square root, as the
+        // cluster powers do through sqrt(Pn/M) in (7.5-28).
+        losScale /= std::sqrt(std::pow(10.0, channelParams->m_attenuation_dB[0] / 10.0));
+
+        // Field patterns depend only on the angle and the panel
+        // polarisation, NOT on the element index. Cache one (Phi,
+        // Theta) per polarisation per side.
+        std::complex<double> rxFieldPhi[2]{};
+        std::complex<double> rxFieldTheta[2]{};
+        std::complex<double> txFieldPhi[2]{};
+        std::complex<double> txFieldTheta[2]{};
+        for (uint8_t p = 0; p < numPolU; ++p)
+        {
+            std::tie(rxFieldPhi[p], rxFieldTheta[p]) = uAntenna->GetElementFieldPattern(
+                Angles(uAngle.GetAzimuth(), uAngle.GetInclination()),
+                p);
+        }
+        for (uint8_t p = 0; p < numPolS; ++p)
+        {
+            std::tie(txFieldPhi[p], txFieldTheta[p]) = sAntenna->GetElementFieldPattern(
+                Angles(sAngle.GetAzimuth(), sAngle.GetInclination()),
+                p);
+        }
+
+        const size_t totalPages = hUsn.GetNumPages();
         for (size_t uIndex = 0; uIndex < uSize; uIndex++)
         {
-            Vector uLoc = uAntenna->GetElementLocation(uIndex);
-            double rxPhaseDiff = 2 * M_PI *
-                                 (sinUAngleIncl * cosUAngleAz * uLoc.x +
-                                  sinUAngleIncl * sinUAngleAz * uLoc.y + cosUAngleIncl * uLoc.z);
+            const Vector& uLoc = uLocs[uIndex];
+            const uint8_t polU = uPols[uIndex];
+            const double rxPhaseDiff =
+                2.0 * M_PI *
+                (sinUAngleIncl * cosUAngleAz * uLoc.x + sinUAngleIncl * sinUAngleAz * uLoc.y +
+                 cosUAngleIncl * uLoc.z);
+            const std::complex<double> rxRot = std::polar(1.0, rxPhaseDiff);
 
             for (size_t sIndex = 0; sIndex < sSize; sIndex++)
             {
-                Vector sLoc = sAntenna->GetElementLocation(sIndex);
-                std::complex<double> ray(0, 0);
-                double txPhaseDiff =
-                    2 * M_PI *
+                const Vector& sLoc = sLocs[sIndex];
+                const uint8_t polS = sPols[sIndex];
+                const double txPhaseDiff =
+                    2.0 * M_PI *
                     (sinSAngleIncl * cosSAngleAz * sLoc.x + sinSAngleIncl * sinSAngleAz * sLoc.y +
                      cosSAngleIncl * sLoc.z);
 
-                auto [rxFieldPatternPhi, rxFieldPatternTheta] = uAntenna->GetElementFieldPattern(
-                    Angles(uAngle.GetAzimuth(), uAngle.GetInclination()),
-                    uAntenna->GetElemPol(uIndex));
-                auto [txFieldPatternPhi, txFieldPatternTheta] = sAntenna->GetElementFieldPattern(
-                    Angles(sAngle.GetAzimuth(), sAngle.GetInclination()),
-                    sAntenna->GetElemPol(sIndex));
+                const std::complex<double> ray = (rxFieldTheta[polU] * txFieldTheta[polS] -
+                                                  rxFieldPhi[polU] * txFieldPhi[polS]) *
+                                                 phaseDiffDueToDistance * rxRot *
+                                                 std::polar(1.0, txPhaseDiff);
 
-                ray = (rxFieldPatternTheta * txFieldPatternTheta -
-                       rxFieldPatternPhi * txFieldPatternPhi) *
-                      phaseDiffDueToDistance * std::complex(cos(rxPhaseDiff), sin(rxPhaseDiff)) *
-                      std::complex(cos(txPhaseDiff), sin(txPhaseDiff));
-
-                double kLinear = pow(10, channelParams->m_K_factor / 10.0);
-                // the LOS path should be attenuated if blockage is enabled.
-                hUsn(uIndex, sIndex, 0) =
-                    sqrt(1.0 / (kLinear + 1)) * hUsn(uIndex, sIndex, 0) +
-                    sqrt(kLinear / (1 + kLinear)) * ray /
-                        pow(10,
-                            channelParams->m_attenuation_dB[0] / 10.0); //(7.5-30) for tau = tau1
-                for (size_t nIndex = 1; nIndex < hUsn.GetNumPages(); nIndex++)
-                {
-                    hUsn(uIndex, sIndex, nIndex) *=
-                        sqrt(1.0 / (kLinear + 1)); //(7.5-30) for tau = tau2...tauN
-                }
+                // (7.5-30) for tau = tau1: the first cluster is the Ricean
+                // combination of its NLOS coefficient and the LOS ray.
+                hUsn(uIndex, sIndex, 0) = nlosScale * hUsn(uIndex, sIndex, 0) + losScale * ray;
             }
         }
-    }
 
-    std::ostringstream oss;
-    oss << "Husn (sAntenna, uAntenna): " << sAntenna->GetId() << ", " << uAntenna->GetId()
-        << " | vals=[";
-
-    bool first = true;
-    for (size_t cIndex = 0; cIndex < hUsn.GetNumPages(); ++cIndex)
-    {
-        for (size_t rowIdx = 0; rowIdx < hUsn.GetNumRows(); ++rowIdx)
+        // (7.5-30) for tau = tau2...tauN: every remaining cluster is scaled by
+        // nlosScale for all element pairs, so scale whole pages in flat passes.
+        const size_t elemsPerPage = uSize * sSize;
+        for (size_t nIndex = 1; nIndex < totalPages; nIndex++)
         {
-            for (size_t colIdx = 0; colIdx < hUsn.GetNumCols(); ++colIdx)
+            std::complex<double>* page = hUsn.GetPagePtr(nIndex);
+            for (size_t i = 0; i < elemsPerPage; ++i)
             {
-                if (!first)
-                {
-                    oss << ", ";
-                }
-                first = false;
-                oss << hUsn(rowIdx, colIdx, cIndex);
+                page[i] *= nlosScale;
             }
         }
     }
-    oss << "]";
 
-    NS_LOG_DEBUG(oss.str());
+    if (g_log.IsEnabled(ns3::LOG_DEBUG))
+    {
+        std::ostringstream oss;
+        oss << "Husn (sAntenna, uAntenna): " << sAntenna->GetId() << ", " << uAntenna->GetId()
+            << " | vals=[";
 
+        bool first = true;
+        for (size_t cIndex = 0; cIndex < hUsn.GetNumPages(); ++cIndex)
+        {
+            for (size_t rowIdx = 0; rowIdx < hUsn.GetNumRows(); ++rowIdx)
+            {
+                for (size_t colIdx = 0; colIdx < hUsn.GetNumCols(); ++colIdx)
+                {
+                    if (!first)
+                    {
+                        oss << ", ";
+                    }
+                    first = false;
+                    oss << hUsn(rowIdx, colIdx, cIndex);
+                }
+            }
+        }
+        oss << "]";
+
+        NS_LOG_DEBUG(oss.str());
+    }
     NS_LOG_INFO("size of coefficient matrix (rows, columns, clusters) = ("
                 << hUsn.GetNumRows() << ", " << hUsn.GetNumCols() << ", " << hUsn.GetNumPages()
                 << ")");
@@ -4352,8 +5149,11 @@ ThreeGppChannelModel::WrapAngles(double azimuthRad, double inclinationRad)
     inclinationRad = WrapTo2Pi(inclinationRad);
     if (inclinationRad > M_PI)
     {
-        // inclination must be in [0, M_PI]
-        inclinationRad -= M_PI;
+        // An inclination past the pole is the direction mirrored through it:
+        // (theta, phi) with theta in (pi, 2 pi) is (2 pi - theta, phi + pi).
+        // Subtracting pi instead sent a ray just past the nadir to just below
+        // the zenith, i.e. into the wrong hemisphere.
+        inclinationRad = 2 * M_PI - inclinationRad;
         azimuthRad += M_PI;
     }
 

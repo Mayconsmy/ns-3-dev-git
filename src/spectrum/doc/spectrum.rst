@@ -209,17 +209,83 @@ of the available implementations:
 
  * ``AlohaNoackNetDevice``: a minimal NetDevice that allows to send
    packets over ``HalfDuplexIdealPhy`` (or other PHY model based on
-   the  ``GenericPhy`` interface).
+   the  ``GenericPhy`` interface). It provides NetDevice trace sources
+   ``MacTx``, ``MacTxDrop``, ``MacRx``, and ``MacPromiscRx``.
 
  * ``SpectrumAnalyzer``, ``WaveformGenerator`` and ``MicrowaveOven`` are examples of PHY
    models other than communication devices - the names should be
    self-explaining.
 
 
+Sionna RT channel model
+#######################
+
+## Overview
+
+The Sionna RT channel model as alternative to stochastic 3GPP channel models (e.g., TR 38.901) with a deterministic, geometry-based ray tracer.
+At each channel update event, ns-3 calls Sionna RT in-process through pybind11. The resulting per-path delays, Doppler shifts,
+and angles-of-arrival/departure are converted directly into ns-3's internal `ChannelMatrix` format.
 
 
+**Key properties:**
+- In-process communication — no sockets, RPC calls, or temporary files
+- Compatible with all modules that use `MatrixBasedChannelModel` (5G-LENA, LTE, etc.)
+- GPU-accelerated (NVIDIA CUDA) with CPU fallback via LLVM/Dr.Jit
+- Scenes defined in Mitsuba 3 XML format (exportable from Blender)
 
+The spectrum module also exposes an integration with the ``sionna.rt``
+ray-tracing library through two classes: ``SionnaRtChannelModel`` and
+``SionnaRtSpectrumPropagationLossModel``.
 
+``SionnaRtChannelModel`` is a ``MatrixBasedChannelModel`` implementation that
+creates frequency-selective, phase-coherent MIMO channel matrices from Sionna
+RT scenes. It loads either built-in Sionna RT scenarios or custom XML scene
+files, runs the Sionna RT path solver, extracts impulse responses, delays,
+Doppler, and angular metadata, and caches channel matrices per link.
+
+Features of ``SionnaRtChannelModel`` include:
+
+* scene selection via the ``Scenario`` attribute, supporting both built-in
+  scenario names and XML scene paths;
+* a configurable operating frequency through the ``Frequency`` attribute;
+* an update mechanism driven by ``UpdatePeriod`` to refresh cached channel
+  matrices when the channel coherence time is exceeded;
+* path-count control using ``MaxNumberOfPaths`` and recursive path solver
+  depth reduction;
+* optional path delay normalization via ``NormalizeDelays``;
+* scene image rendering support through ``IsImageRenderedEnabled``,
+  ``OutputImageDirectory`` and ``OutputImageName``;
+* shape merging for scene loading via ``IsMergeShapeEnabled``.
+
+The model also exposes an ``RtPathSolverConfig`` structure with parameters
+such as ``maxDepth``, ``los``, ``specularReflection``, ``diffuseReflection``,
+``refraction``, ``diffraction``, ``edgeDiffraction``, ``syntheticArray`` and
+``seed`` which is decoupled from ns-3 RngRun/RngSeed for fine-grained control over the ray-tracing path solver behavior.
+
+``SionnaRtSpectrumPropagationLossModel`` is a
+``PhasedArraySpectrumPropagationLossModel`` implementation that uses a
+``SionnaRtChannelModel`` instance to obtain the underlying channel matrix and
+path metadata. It computes the received power spectral density by applying
+3GPP-style fast fading and beamforming gain to the channel matrix, accounting
+for path delays and Doppler shifts.
+
+Key behaviors of ``SionnaRtSpectrumPropagationLossModel``:
+
+* it is intended for use with ``SingleModelSpectrumChannel`` or
+  ``MultiModelSpectrumChannel``;
+* it accepts a ``MatrixBasedChannelModel`` via ``SetChannelModel()``;
+* it can forward ray-tracing solver settings to the attached channel model
+  through ``SetRtPathSolverConfig()``;
+* it caches and reuses long-term beamforming components per node pair and
+  recomputes them only when the channel realization or beamforming vectors
+  change;
+* it is suitable for phased-array MIMO simulations in which frequency-dependent
+  channel effects, beamforming, and Doppler are required.
+
+The example program ``src/spectrum/examples/sionna-rt-channel-example.cc``
+illustrates how to configure the Sionna RT channel model, attach the
+spectrum propagation loss model to a channel, and compute average SNR over a
+simple two-node scenario.
 
 
 References
@@ -668,8 +734,16 @@ please have a look at the documentation of the classes
     channel is evaluated and the configured ``UpdatePeriod`` has elapsed; if the
     maximum distance the BS and/or UT traveled between evaluations exceeds
     the 1 m step-size constraint, the model falls back to re-generating channel
-    parameters and thus the channel matrix). Drop-based spatial consistency across
-    multiple initial locations (Sec. 7.6.3.1) and Procedure B are not implemented.
+    parameters and thus the channel matrix). Procedure B is not implemented.
+
+  * Drop-based (inter-UE) spatial consistency across initial locations
+    (Sec. 7.6.3.1) is available for the large-scale parameters and the cluster
+    and ray specific random variables through the ``InterUeSpatialConsistency``
+    attribute of the channel condition model (disabled by default); see below.
+
+  * The large bandwidth and large antenna array modeling of Sec. 7.6.2.2 is
+    available through the ``LargeBandwidthArrayModeling`` attribute (disabled
+    by default); see below.
 
   * Issue regarding the blockage model: according to 3GPP TR 38.901 v15.0.0
     (2018-06) section 7.6.4.1, the blocking region for self-blocking is provided
@@ -705,13 +779,14 @@ received PSD and the frequency domain 3D spectrum channel matrix.
 Procedure used to compute the PSD of the received signal and the frequency domain 3D
 spectrum channel matrix:
 
-1. Retrieve the beamforming vectors
-To account for the beamforming, ``ThreeGppSpectrumPropagationLossModel`` has to
-retrieve the beamforming vectors of the transmitting and receiving antennas.
-The method ``DoCalcRxPowerSpectralDensity`` uses the antenna objects
-that are passed as parameters for both the transmitting and receiving devices,
-and calls the method GetBeamformingVector to retrieve the beamforming vectors
-of these antenna objects.
+1. Obtain the beamforming vectors
+To account for the beamforming, ``ThreeGppSpectrumPropagationLossModel`` needs
+the beamforming vectors of the transmitting and receiving antennas.
+The method ``DoCalcRxPowerSpectralDensity`` receives them as parameters,
+together with the antenna objects of both devices; it does not read the
+vectors from the antenna objects itself, so the caller decides which vectors
+apply (``MultiModelSpectrumChannel`` passes the transmitter's vector captured
+when the transmission started).
 
 2. Retrieve the channel matrix and the channel params
 The ``ThreeGppSpectrumPropagationLossModel`` relies on the ``ThreeGppChannelModel`` class
@@ -882,8 +957,32 @@ changes driven by the channel-condition model) would have to implement a map/fie
 approach (e.g., spatially correlated LSP maps in WINNER-derived frameworks such as
 QuaDRiGa) [WIN2D112]_ [QUADRIGA]_ or an explicitly position-seeded regeneration policy.
 
-Drop-based spatial consistency across multiple initial locations (TR 38.901 Sec. 7.6.3.1)
-and Procedure B (TR 38.901 Sec. 7.6.3.2) are not implemented in this model.
+**Inter-UE (drop-based) spatial consistency:** When the ``InterUeSpatialConsistency``
+attribute of the ``ChannelConditionModel`` configured in the channel model is
+enabled (see the ``propagation`` module documentation, which also describes how
+the site nodes are designated), the normal variates feeding the LSP
+cross-correlation are samples of ``SpatialGaussianField`` random fields
+evaluated at the terminal position (TR 38.901 Sec. 7.6.3.1), one field per
+site, channel condition (LOS/NLOS/O2I) and LSP, with the correlation
+distances of Table 7.5-6 (V2V and NTN fall back to the UMa distances). The
+fields are pure functions of position, identical across model instances, so
+links from the same site to nearby terminals obtain correlated LSPs, a channel
+re-generated at the same location reproduces them, and the LSPs of a moving UE
+evolve smoothly across re-generations.
+
+The cluster and ray specific random variables of the fast fading (cluster
+delays and shadowing, angle signs and offsets, random coupling of rays,
+cross-polarization power ratios, initial phases and Doppler terms) are drawn
+the same way with the correlation distance of Table 7.6.3.1-2: uniform variates
+through the probability integral transform of the field samples, and the ray
+coupling by sorting per-ray field samples. Together with the
+``ThreeGppPropagationLossModel`` (shadow fading and O2I penetration loss) and
+``ThreeGppChannelConditionModel`` (LOS/NLOS and indoor states), which consult
+the same attribute, this yields fully spatially-consistent SNR maps, see
+``three-gpp-inter-ue-spatial-consistency-example``. The temporal evolution of
+an existing link is still governed by Procedure A through ``UpdatePeriod``.
+
+Procedure B (TR 38.901 Sec. 7.6.3.2) is not implemented in this model.
 
 The initial channel realization for a link is generated using the standard 3GPP
 cluster/ray generation procedure (Fig. 7.5-1). Spatial consistency is then introduced
@@ -1078,6 +1177,30 @@ method ``CalcAttenuationOfBlockage``, which computes the additional attenuation.
 The blockage feature can be disable through the attribute "Blockage". Also, the
 attributes "NumNonselfBlocking", "PortraitMode" and "BlockerSpeed" can be used
 to configure the model.
+
+Large bandwidth and large antenna array modeling
+################################################
+
+The intra-cluster angular and delay spread modeling of TR 38.901 Sec. 7.6.2.2
+is enabled through the ``LargeBandwidthArrayModeling`` attribute of
+``ThreeGppChannelModel`` (disabled by default). Step 7 then follows the
+specification: per-ray offset angles drawn as unif(-2, 2) (Equation 7.6-5)
+instead of the fixed offsets of Table 7.5-3, per-ray relative delays drawn as
+unif(0, 2 cDS) with unequal ray powers (Equation 7.6-6), and a number of rays
+per cluster derived from the ``ChannelBandwidth`` attribute and the maximum
+antenna aperture over the two link ends (Equation 7.6-8, sparseness parameter
+0.5), bounded by the ``MaxRaysPerCluster`` attribute (Mmax). Each ray becomes
+an individually delayed tap (Equation 7.6-3); the sub-cluster mapping of Table
+7.5-5 and the random coupling of rays are not applied, the latter because it
+would break the association between a ray's angles and its power. With
+``InterUeSpatialConsistency`` the per-ray offsets and delays are drawn from the
+spatially-correlated fields; channel updates regenerate the per-ray taps
+instead of applying the Procedure A update equations. The propagation delay
+modeling of Sec. 7.6.2.1 is not implemented.
+
+``three-gpp-inter-ue-spatial-consistency-example`` can compare SNR maps with
+and without the modeling: the wideband SNR statistics coincide, since power is
+only redistributed within clusters, while the fast-fading realizations differ.
 
 Testing
 #######

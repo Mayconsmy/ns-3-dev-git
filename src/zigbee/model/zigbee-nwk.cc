@@ -21,7 +21,7 @@ using namespace ns3::lrwpan;
 
 #undef NS_LOG_APPEND_CONTEXT
 #define NS_LOG_APPEND_CONTEXT                                                                      \
-    std::clog << "[" << m_nwkNetworkAddress << " | " << m_nwkIeeeAddress << "] ";
+    ns3LogStream << "[" << m_nwkNetworkAddress << " | " << m_nwkIeeeAddress << "] ";
 
 namespace ns3
 {
@@ -202,6 +202,7 @@ ZigbeeNwk::DoDispose()
     m_rreqRetryTable.Dispose();
     m_panIdTable.Dispose();
     m_btt.Dispose();
+    m_nwkAddressMap.Dispose();
 
     DisposeTxPktBuffer();
     DisposePendingTx();
@@ -1282,7 +1283,7 @@ ZigbeeNwk::McpsDataConfirm(McpsDataConfirmParams params)
             if (!m_nldeDataConfirmCallback.IsNull())
             {
                 // Zigbee Specification r22.1.0, End of Section 3.2.1.1.3
-                // Report the the results of a request to a transmission of a packet
+                // Report the results of a request to a transmission of a packet
                 NldeDataConfirmParams nldeDataConfirmParams;
                 // nldeDataConfirmParams.m_status =
                 // static_cast<ZigbeeNwkStatus>(params.m_status);
@@ -1564,6 +1565,10 @@ ZigbeeNwk::MlmeAssociateConfirm(MlmeAssociateConfirmParams params)
             m_nwkExtendedPanId = m_joinParams.m_extendedPanId;
             m_nwkPanId = m_associateParams.m_coordPanId;
 
+            // Update the device own mapping of 16-bit - 64 bit address
+            // in its nwkAddressMap
+            m_nwkAddressMap.Update(m_nwkIeeeAddress, params.m_assocShortAddr);
+
             // Update relationship
             if (m_associateParams.m_coordAddrMode == lrwpan::AddressMode::EXT_ADDR)
             {
@@ -1660,6 +1665,12 @@ ZigbeeNwk::MlmeStartConfirm(MlmeStartConfirmParams params)
         m_nwkExtendedPanId = 0xffffffffffffffed;
         m_nwkNetworkAddress = Mac16Address("ff:ff");
         m_nwkPanId = 0xffff;
+    }
+    else
+    {
+        // Update the coordinator or router device nwkAddressMap
+        // with its own addresses information
+        m_nwkAddressMap.Update(m_nwkIeeeAddress, m_nwkNetworkAddress);
     }
 
     if (m_pendPrimitiveNwk == NLME_NETWORK_FORMATION)
@@ -2161,6 +2172,10 @@ ZigbeeNwk::MlmeAssociateIndication(MlmeAssociateIndicationParams params)
         // Optional parameters
         newEntry->SetExtPanId(m_nwkExtendedPanId);
 
+        // Update the network address map in the router or coordinator
+        // accepting the association.
+        m_nwkAddressMap.Update(params.m_extDevAddr, allocatedAddr);
+
         MlmeAssociateResponseParams responseParams;
         responseParams.m_extDevAddr = params.m_extDevAddr;
 
@@ -2345,6 +2360,15 @@ ZigbeeNwk::NldeDataRequest(NldeDataRequestParams params, Ptr<Packet> packet)
         if (IsBroadcastAddress(params.m_dstAddr))
         {
             // The destination is BROADCAST (See 3.6.5)
+            // Record the originated broadcast in the Broadcast Transaction Table (BTT)
+            // so that copies rebroadcast back by neighbors are suppressed and not
+            // delivered again to the next higher layer.
+            Ptr<BroadcastTransactionRecord> btr = Create<BroadcastTransactionRecord>(
+                nwkHeader.GetSrcAddr(),
+                nwkHeader.GetSeqNum(),
+                Simulator::Now() + m_nwkNetworkBroadcastDeliveryTime);
+            m_btt.AddEntry(btr);
+
             SendDataBcst(packet, params.m_nsduHandle);
         }
         else
@@ -2939,6 +2963,24 @@ ZigbeeNwk::NlmeStartRouterRequest(NlmeStartRouterRequestParams params)
                                m_mac,
                                MacPibAttributeIdentifier::pCurrentChannel);
     }
+}
+
+bool
+ZigbeeNwk::GetNwkAddrByIeeeAddr(Mac64Address ieeeAddr, Mac16Address& nwkAddr)
+{
+    return m_nwkAddressMap.LookupNwkAddress(ieeeAddr, nwkAddr);
+}
+
+bool
+ZigbeeNwk::GetIeeeAddrByNwkAddr(Mac16Address nwkAddr, Mac64Address& ieeeAddr)
+{
+    return m_nwkAddressMap.LookupIeeeAddress(nwkAddr, ieeeAddr);
+}
+
+void
+ZigbeeNwk::UpdateNwkAddrMap(Mac16Address nwkAddr, Mac64Address ieeeAddr)
+{
+    m_nwkAddressMap.Update(ieeeAddr, nwkAddr);
 }
 
 void

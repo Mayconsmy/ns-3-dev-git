@@ -218,10 +218,20 @@ class CsmaNetDevice : public NetDevice
     Ptr<Channel> GetChannel() const override;
     bool SetMtu(const uint16_t mtu) override;
     uint16_t GetMtu() const override;
+
+    uint16_t GetPaddingThreshold() const override;
     void SetAddress(Address address) override;
     Address GetAddress() const override;
     bool IsLinkUp() const override;
     void AddLinkChangeCallback(Callback<void> callback) override;
+
+    /**
+     * Notify any interested parties that the link has gone down, i.e. that the
+     * device has been detached from its channel. Marks the link as down and
+     * fires the link-change callbacks.
+     */
+    void NotifyLinkDown();
+
     bool IsBroadcast() const override;
     Address GetBroadcast() const override;
     bool IsMulticast() const override;

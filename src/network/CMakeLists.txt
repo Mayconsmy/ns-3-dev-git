@@ -115,6 +115,10 @@ set(header_files
     utils/flow-id-tag.h
     utils/generic-phy.h
     utils/header-serialization-test.h
+    utils/iana-link-type-numbers.h
+    utils/iana-ieee802-numbers.h
+    utils/iana-ppp-numbers.h
+    utils/iana-internet-protocol-numbers.h
     utils/inet-socket-address.h
     utils/inet6-socket-address.h
     utils/ipv4-address.h
@@ -165,11 +169,15 @@ build_lib(
     test/error-model-test-suite.cc
     test/ipv6-address-test-suite.cc
     test/lollipop-counter-test.cc
+    test/network-traced-callback-typedef-test-suite.cc
     test/packet-metadata-test.cc
     test/packet-socket-apps-test-suite.cc
     test/packet-test-suite.cc
     test/packetbb-test-suite.cc
+    test/pcap-explicit-filename-test-suite.cc
     test/pcap-file-test-suite.cc
     test/sequence-number-test-suite.cc
+    test/simple-net-device-test.cc
     test/test-data-rate.cc
+    test/traced-value-callback-typedef-test-suite.cc
 )

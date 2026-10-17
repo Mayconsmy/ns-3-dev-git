@@ -306,7 +306,7 @@ run the following command:
 
 Due to the integration of clang-tidy with CMake, clang-tidy can be run while building
 |ns3|. In this way, clang-tidy errors will be shown alongside build errors on the terminal.
-To build |ns3| and run clang-tidy, run the the following command:
+To build |ns3| and run clang-tidy, run the following command:
 
 .. sourcecode:: console
 
@@ -336,6 +336,29 @@ When running clang-tidy, please note that:
   must be made by the developer.
 
 - Enabling clang-tidy will add time to the build process (in the order of minutes).
+
+clang-tidy integration with GitLab CI/CD
+========================================
+
+To ensure that the |ns3| codebase follows the guidelines enforced by clang-tidy,
+there are two clang-tidy jobs in the GitLab CI/CD pipeline.
+
+* ``clang-tidy-diff-scan``: This job runs a clang-tidy scan on Merge Requests (MRs),
+  and only scans the files modified by the MR. However, if the MR modifies clang-tidy
+  or CI/CD configurations, this job is skipped in favor of a full scan.
+* ``clang-tidy-full-scan``: This job runs a clang-tidy scan on all C++ files.
+  It runs automatically whenever new commits are pushed to the master branch, in
+  scheduled pipelines, and when clang-tidy or CI/CD configurations are changed.
+
+The ``clang-tidy-full-scan`` job can also be run in MR pipelines by manually triggering
+the job in the GitLab UI.
+Although it is not necessary in most cases, this job can be useful in MRs with large
+refactorings or changes to class constructors, which might trigger warnings in files
+that were not directly modified by the MR, but which might be affected by its changes
+(for example, modernize-use-auto warnings).
+
+To start the job, go to the MR's Pipelines tab, click on the ``code linting`` stage,
+and then click on the "play button" of the ``clang-tidy-full-scan`` job.
 
 Disable clang-tidy analysis in specific lines
 =============================================
@@ -1135,6 +1158,27 @@ identifier begins the sentence. Two spaces after each sentence helps to make
 emacs sentence commands work. Sometimes ``NS_LOG_DEBUG`` statements can
 be also used in place of comments.
 
+Comments should describe the code as it currently stands, not its history.
+Do not write comments that narrate a change or contrast new code with what
+was there before (e.g., "the previous version used std::abs, which forced a
+positive angle"). Such rationale belongs in the Work Item or Merge
+Request description, not in the source, where it becomes stale and misleads
+future readers who never saw the old code. Reserve comments for nuance or
+careful handling that is not evident from the code itself; do not add a
+comment for every statement or to restate what straightforward code plainly
+does.  Comments about previous code are acceptable if pointing to a common
+pitfall, to avoid such code from being reintroduced (e.g., a comment such
+as "Optimization: Ternary if operator is faster than std::max()" or
+"Avoid (...) due to rounding issues. See issue #..." are appropriate
+to leave behind).
+
+Conventions for the logging facility itself, including the meaning of each
+log level (``LOG_INFO``, ``LOG_LOGIC``, ``LOG_DEBUG``, etc.) and
+guidance on the use of ``NS_LOG_FUNCTION`` and when to choose between
+different levels (including logging in constructors and destructors), are
+documented in the Logging chapter of the manual
+(``doc/manual/source/logging-asserts.rst``).
+
 Short one-line comments and long comments can use the C++ comment style;
 that is, ``//``, but longer comments may use C-style comments.
 Use one space after ``//`` or ``/*``.
@@ -1827,9 +1871,9 @@ Miscellaneous items
     };
 
   For new ns-3 code, we recommend using this operator where possible.  There are cases in which
-  the default does not apply, and you can read about some of them
-  `here <https://en.cppreference.com/w/cpp/language/default_comparisons.html>`_ and
-  `here <https://devblogs.microsoft.com/cppblog/simplify-your-code-with-rocket-science-c20s-spaceship-operator/>`_.
+  the default does not apply, and you can read about some of them on
+  `cppreference's default comparisons page <https://en.cppreference.com/w/cpp/language/default_comparisons.html>`_
+  and on `Microsoft's C++ blog post on the spaceship operator <https://devblogs.microsoft.com/cppblog/simplify-your-code-with-rocket-science-c20s-spaceship-operator/>`_.
   You may notice in the ns-3 codebase that most code defines operators separately, because the code predates C++20.
   Some of this code may be changed to use ``<=>`` over time.
 

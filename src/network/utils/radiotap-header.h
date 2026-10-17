@@ -118,13 +118,15 @@ class RadiotapHeader : public Header
 
     /**
      * @brief Set the frame flags of the transmitted or received frame.
+     *
      * @param flags flags to set.
      */
     void SetFrameFlags(uint8_t flags);
 
     /**
-     * @brief Set the transmit/receive channel frequency in units of megahertz
-     * @param rate the transmit/receive channel frequency in units of megahertz.
+     * @brief Set the transmit/receive rate in units of 500 Kbps.
+     *
+     * @param rate the transmit/receive rate to set.
      */
     void SetRate(uint8_t rate);
 
@@ -344,8 +346,8 @@ class RadiotapHeader : public Header
         HE_DATA1_STBC_KNOWN = 0x0200,         /**< STBC known */
         HE_DATA1_SPTL_REUSE_KNOWN =
             0x0400, /**< Spatial Reuse known (Spatial Reuse 1 for HE TRIG PPDU format) */
-        HE_DATA1_SPTL_REUSE2_KNOWN = 0x0800, /**< Spatial Reuse 2 known (HE TRIG PPDU format),
-                                                STA-ID known (HE MU PPDU format) */
+        HE_DATA1_SPTL_REUSE2_KNOWN = 0x0800, /**< Spatial Reuse 2 known (HE TRIG
+                                                PPDU format), STA-ID known (HE MU PPDU format) */
         HE_DATA1_SPTL_REUSE3_KNOWN = 0x1000, /**< Spatial Reuse 3 known (HE TRIG PPDU format) */
         HE_DATA1_SPTL_REUSE4_KNOWN = 0x2000, /**< Spatial Reuse 4 known (HE TRIG PPDU format) */
         HE_DATA1_BW_RU_ALLOC_KNOWN = 0x4000, /**< data BW/RU allocation known */

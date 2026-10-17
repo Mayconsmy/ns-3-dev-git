@@ -21,6 +21,7 @@
 #include "ns3/abort.h"
 #include "ns3/assert.h"
 #include "ns3/boolean.h"
+#include "ns3/iana-ieee802-numbers.h"
 #include "ns3/integer.h"
 #include "ns3/ipv6-interface.h"
 #include "ns3/ipv6-l3-protocol.h"
@@ -214,14 +215,14 @@ SixLowPanNdProtocol::SendSixLowPanNsWithEaro(Ipv6Address addrToRegister,
     Ipv6Header hdr;
     hdr.SetSource(src);
     hdr.SetDestination(dst);
-    hdr.SetNextHeader(Icmpv6L4Protocol::PROT_NUMBER);
+    hdr.SetNextHeader(iana::internetprotocolnumbers::ICMPV6);
     hdr.SetPayloadLength(p->GetSize());
     hdr.SetHopLimit(255);
 
     Ptr<Packet> pkt = p->Copy();
     pkt->AddHeader(hdr);
 
-    sixLowPanNetDevice->Send(pkt, dstMac, Ipv6L3Protocol::PROT_NUMBER);
+    sixLowPanNetDevice->Send(pkt, dstMac, iana::ieee802numbers::IPV6);
 }
 
 void
@@ -278,8 +279,7 @@ SixLowPanNdProtocol::SendSixLowPanMulticastRS(Ipv6Address src, Address hardwareA
 
     rs.CalculatePseudoHeaderChecksum(src,
                                      Ipv6Address::GetAllRoutersMulticast(),
-                                     p->GetSize() + rs.GetSerializedSize(),
-                                     PROT_NUMBER);
+                                     p->GetSize() + rs.GetSerializedSize());
     p->AddHeader(rs);
 
     m_rsRetransmissionCount++;
@@ -347,7 +347,7 @@ SixLowPanNdProtocol::SendSixLowPanRA(Ipv6Address src, Ipv6Address dst, Ptr<Ipv6I
         Ipv6Header ipHeader;
         ipHeader.SetSource(src);
         ipHeader.SetDestination(dst);
-        ipHeader.SetNextHeader(PROT_NUMBER);
+        ipHeader.SetNextHeader(iana::internetprotocolnumbers::ICMPV6);
         ipHeader.SetPayloadLength(p->GetSize());
         ipHeader.SetHopLimit(255);
 
@@ -1465,10 +1465,7 @@ SixLowPanNdProtocol::MakeNsEaroPacket(Ipv6Address src,
     p->AddHeader(tlla);
     p->AddHeader(slla);
 
-    nsHdr.CalculatePseudoHeaderChecksum(src,
-                                        dst,
-                                        p->GetSize() + nsHdr.GetSerializedSize(),
-                                        PROT_NUMBER);
+    nsHdr.CalculatePseudoHeaderChecksum(src, dst, p->GetSize() + nsHdr.GetSerializedSize());
     p->AddHeader(nsHdr);
 
     return p;
@@ -1483,10 +1480,7 @@ SixLowPanNdProtocol::MakeNaEaroPacket(Ipv6Address src,
     Ptr<Packet> p = Create<Packet>();
     p->AddHeader(earo);
 
-    naHdr.CalculatePseudoHeaderChecksum(src,
-                                        dst,
-                                        p->GetSize() + naHdr.GetSerializedSize(),
-                                        PROT_NUMBER);
+    naHdr.CalculatePseudoHeaderChecksum(src, dst, p->GetSize() + naHdr.GetSerializedSize());
     p->AddHeader(naHdr);
 
     return p;
@@ -1542,7 +1536,7 @@ SixLowPanNdProtocol::MakeRaPacket(Ipv6Address src,
     }
 
     // Compute checksum after everything is added
-    ra.CalculatePseudoHeaderChecksum(src, dst, p->GetSize() + ra.GetSerializedSize(), PROT_NUMBER);
+    ra.CalculatePseudoHeaderChecksum(src, dst, p->GetSize() + ra.GetSerializedSize());
     p->AddHeader(ra);
 
     return p;

@@ -32,7 +32,6 @@
 #include "ns3/propagation-delay-model.h"
 #include "ns3/propagation-loss-model.h"
 #include "ns3/queue-size.h"
-#include "ns3/rng-seed-manager.h"
 #include "ns3/ssid.h"
 #include "ns3/string.h"
 #include "ns3/uinteger.h"
@@ -2458,9 +2457,6 @@ Experiment::Run(const WifiHelper& helper,
                 dBm_u staTxPower,
                 Time pktInterval)
 {
-    RngSeedManager::SetSeed(10);
-    RngSeedManager::SetRun(10);
-
     NodeContainer wifiNodes;
     if (infra)
     {
@@ -2937,7 +2933,7 @@ main(int argc, char* argv[])
                  "Set the constant channel width in MHz (only for 11n/ac/ax)",
                  channelWidth);
     cmd.AddValue("guardIntervalNs",
-                 "Set the the guard interval in nanoseconds (800 or 400 for 11n/ac, 800 or 1600 or "
+                 "Set the guard interval in nanoseconds (800 or 400 for 11n/ac, 800 or 1600 or "
                  "3200 for 11 ax)",
                  guardIntervalNs);
     cmd.AddValue("maxMpdus",
@@ -3185,12 +3181,11 @@ main(int argc, char* argv[])
                            apTxPower,
                            staTxPower,
                            MicroSeconds(pktInterval));
-            uint32_t k = 0;
             if (bytesReceived.size() != n)
             {
                 NS_FATAL_ERROR("Not all stations got traffic!");
             }
-            for (auto it = bytesReceived.begin(); it != bytesReceived.end(); it++, k++)
+            for (auto it = bytesReceived.begin(); it != bytesReceived.end(); ++it)
             {
                 Time first = timeFirstReceived.find(it->first)->second;
                 Time last = timeLastReceived.find(it->first)->second;

@@ -14,6 +14,7 @@
 #include "ipv4.h"
 
 #include "ns3/deprecated.h"
+#include "ns3/iana-ieee802-numbers.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/net-device.h"
 #include "ns3/nstime.h"
@@ -78,7 +79,8 @@ class Ipv4L3Protocol : public Ipv4
      */
     static TypeId GetTypeId();
 
-    static constexpr uint16_t PROT_NUMBER = 0x0800; //!< Protocol number
+    NS_DEPRECATED_3_49("Use the numbers defined in iana-ieee802-numbers.h")
+    static constexpr uint16_t PROT_NUMBER = iana::ieee802numbers::IPV4; //!< Protocol number
 
     Ipv4L3Protocol();
     ~Ipv4L3Protocol() override;
@@ -362,6 +364,16 @@ class Ipv4L3Protocol : public Ipv4
     void RouteInputError(Ptr<const Packet> p,
                          const Ipv4Header& ipHeader,
                          Socket::SocketErrno sockErrno);
+
+    /**
+     * @brief Return an ICMP Destination Unreachable (net unreachable) to the
+     * source of a datagram that this router could not forward for lack of a
+     * route. No message is generated unless this node is a forwarder, and never
+     * for a multicast or broadcast destination (see @issueid{825}).
+     * @param ipHeader IPv4 header of the undeliverable datagram
+     * @param packet the undeliverable datagram payload
+     */
+    void SendIcmpNoRoute(const Ipv4Header& ipHeader, Ptr<const Packet> packet);
 
     /**
      * @brief Add an IPv4 interface to the stack.

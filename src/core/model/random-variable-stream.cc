@@ -196,7 +196,8 @@ uint32_t
 UniformRandomVariable::GetInteger(uint32_t min, uint32_t max)
 {
     NS_ASSERT(min <= max);
-    auto v = static_cast<uint32_t>(GetValue((double)(min), (double)(max) + 1.0));
+    auto v =
+        static_cast<uint32_t>(GetValue(static_cast<double>(min), static_cast<double>(max) + 1.0));
     NS_LOG_DEBUG("integer value: " << v << " stream: " << GetStream() << " min: " << min << " max "
                                    << max);
     return v;
@@ -743,7 +744,7 @@ NormalRandomVariable::GetValue(double mean, double variance, double bound)
         double v1 = 2 * u1 - 1;
         double v2 = 2 * u2 - 1;
         double w = v1 * v1 + v2 * v2;
-        if (w <= 1.0)
+        if (0.0 < w && w < 1.0)
         { // Got good pair
             double y = std::sqrt((-2 * std::log(w)) / w);
             double x1 = mean + v1 * y * std::sqrt(variance);
@@ -1060,7 +1061,7 @@ GammaRandomVariable::GetNormalValue(double mean, double variance, double bound)
         double v1 = 2 * u1 - 1;
         double v2 = 2 * u2 - 1;
         double w = v1 * v1 + v2 * v2;
-        if (w <= 1.0)
+        if (0.0 < w && w < 1.0)
         { // Got good pair
             double y = std::sqrt((-2 * std::log(w)) / w);
             double x1 = mean + v1 * y * std::sqrt(variance);
@@ -1345,7 +1346,7 @@ ZipfRandomVariable::GetValue(uint32_t n, double alpha)
     m_c = 0.0;
     for (uint32_t i = 1; i <= n; i++)
     {
-        m_c += (1.0 / std::pow((double)i, alpha));
+        m_c += (1.0 / std::pow(static_cast<double>(i), alpha));
     }
     m_c = 1.0 / m_c;
 
@@ -1360,7 +1361,7 @@ ZipfRandomVariable::GetValue(uint32_t n, double alpha)
     double zipf_value = 0;
     for (uint32_t i = 1; i <= n; i++)
     {
-        sum_prob += m_c / std::pow((double)i, alpha);
+        sum_prob += m_c / std::pow(static_cast<double>(i), alpha);
         if (sum_prob > u)
         {
             zipf_value = i;

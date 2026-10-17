@@ -420,7 +420,7 @@ WifiTxVector::SetRuAllocation(const RuAllocation& ruAlloc, uint8_t p20Index)
 const RuAllocation&
 WifiTxVector::GetRuAllocation(uint8_t p20Index) const
 {
-    if (ns3::IsDlMu(m_preamble) && m_ruAllocation.empty())
+    if (ns3::IsDlMu(m_preamble) && !m_muUserInfos.empty() && m_ruAllocation.empty())
     {
         m_ruAllocation = DeriveRuAllocation(p20Index);
     }
@@ -674,7 +674,7 @@ WifiTxVector::SetInactiveSubchannels(const std::vector<bool>& inactiveSubchannel
     NS_ABORT_MSG_IF(m_preamble < WIFI_PREAMBLE_HE_SU,
                     "Only HE (or later) authorized for preamble puncturing");
     NS_ABORT_MSG_IF(
-        m_channelWidth < MHz_u{80},
+        !inactiveSubchannels.empty() && (m_channelWidth < MHz_u{80}),
         "Preamble puncturing only possible for transmission bandwidth of 80 MHz or larger");
     NS_ABORT_MSG_IF(!inactiveSubchannels.empty() &&
                         inactiveSubchannels.size() != Count20MHzSubchannels(m_channelWidth),

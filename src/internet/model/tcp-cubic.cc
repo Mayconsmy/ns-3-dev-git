@@ -5,11 +5,6 @@
  *
  */
 
-#define NS_LOG_APPEND_CONTEXT                                                                      \
-    {                                                                                              \
-        std::clog << Simulator::Now().GetSeconds() << " ";                                         \
-    }
-
 #include "tcp-cubic.h"
 
 #include "ns3/log.h"

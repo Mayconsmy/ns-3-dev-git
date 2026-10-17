@@ -19,6 +19,7 @@
 
 #include "ns3/boolean.h"
 #include "ns3/callback.h"
+#include "ns3/iana-ieee802-numbers.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/log.h"
 #include "ns3/net-device.h"
@@ -362,7 +363,7 @@ Ipv4L3Protocol::SetupLoopback()
     uint32_t index = AddIpv4Interface(interface);
     Ptr<Node> node = GetObject<Node>();
     node->RegisterProtocolHandler(MakeCallback(&Ipv4L3Protocol::Receive, this),
-                                  Ipv4L3Protocol::PROT_NUMBER,
+                                  iana::ieee802numbers::IPV4,
                                   device);
     interface->SetUp();
     if (m_routingProtocol)
@@ -389,18 +390,18 @@ Ipv4L3Protocol::AddInterface(Ptr<NetDevice> device)
     NS_ASSERT(tc);
 
     m_node->RegisterProtocolHandler(MakeCallback(&TrafficControlLayer::Receive, tc),
-                                    Ipv4L3Protocol::PROT_NUMBER,
+                                    iana::ieee802numbers::IPV4,
                                     device);
     m_node->RegisterProtocolHandler(MakeCallback(&TrafficControlLayer::Receive, tc),
-                                    ArpL3Protocol::PROT_NUMBER,
+                                    iana::ieee802numbers::ARP,
                                     device);
 
     tc->RegisterProtocolHandler(MakeCallback(&Ipv4L3Protocol::Receive, this),
-                                Ipv4L3Protocol::PROT_NUMBER,
+                                iana::ieee802numbers::IPV4,
                                 device);
     tc->RegisterProtocolHandler(
         MakeCallback(&ArpL3Protocol::Receive, PeekPointer(GetObject<ArpL3Protocol>())),
-        ArpL3Protocol::PROT_NUMBER,
+        iana::ieee802numbers::ARP,
         device);
 
     Ptr<Ipv4Interface> interface = CreateObject<Ipv4Interface>();
@@ -643,6 +644,28 @@ Ipv4L3Protocol::Receive(Ptr<NetDevice> device,
     {
         NS_LOG_WARN("No route found for forwarding packet.  Drop.");
         m_dropTrace(ipHeader, packet, DROP_NO_ROUTE, this, interface);
+        SendIcmpNoRoute(ipHeader, packet);
+    }
+}
+
+void
+Ipv4L3Protocol::SendIcmpNoRoute(const Ipv4Header& ipHeader, Ptr<const Packet> packet)
+{
+    NS_LOG_FUNCTION(this << ipHeader << packet);
+    // @RFC{1812} sec 4.3.2.7 / 5.2.7.1: a router that cannot forward a datagram
+    // because it has no route to the destination network must return an ICMP
+    // Destination Unreachable (net unreachable) message to the source (see @issueid{825}).
+    // Only a node configured as a forwarder (router) generates this message, and
+    // never in response to a datagram with a multicast or broadcast destination.
+    if (!m_ipForward || ipHeader.GetDestination().IsMulticast() ||
+        ipHeader.GetDestination() == Ipv4Address::GetBroadcast())
+    {
+        return;
+    }
+    Ptr<Icmpv4L4Protocol> icmp = GetIcmp();
+    if (icmp)
+    {
+        icmp->SendDestUnreachNetwork(ipHeader, packet);
     }
 }
 
@@ -778,9 +801,7 @@ Ipv4L3Protocol::Send(Ptr<Packet> packet,
     if (destination.IsBroadcast() || destination.IsLocalMulticast())
     {
         NS_LOG_LOGIC("Ipv4L3Protocol::Send case 2:  limited broadcast - no route");
-        uint32_t ifaceIndex = 0;
-        for (auto ifaceIter = m_interfaces.begin(); ifaceIter != m_interfaces.end();
-             ifaceIter++, ifaceIndex++)
+        for (auto ifaceIter = m_interfaces.begin(); ifaceIter != m_interfaces.end(); ++ifaceIter)
         {
             Ptr<Ipv4Interface> outInterface = *ifaceIter;
             // ANY source matches any interface
@@ -1207,10 +1228,7 @@ Ipv4L3Protocol::SourceAddressSelection(uint32_t interfaceIdx, Ipv4Address dest)
         Ipv4InterfaceAddress test = GetAddress(interfaceIdx, i);
         if (test.GetLocal().CombineMask(test.GetMask()) == dest.CombineMask(test.GetMask()))
         {
-            if (!test.IsSecondary())
-            {
-                return test.GetLocal();
-            }
+            return test.GetLocal();
         }
     }
     return candidate;
@@ -1233,10 +1251,6 @@ Ipv4L3Protocol::SelectSourceAddress(Ptr<const NetDevice> device,
         for (uint32_t j = 0; j < GetNAddresses(i); j++)
         {
             iaddr = GetAddress(i, j);
-            if (iaddr.IsSecondary())
-            {
-                continue;
-            }
             if (iaddr.GetScope() > scope)
             {
                 continue;
@@ -1263,10 +1277,6 @@ Ipv4L3Protocol::SelectSourceAddress(Ptr<const NetDevice> device,
         for (uint32_t j = 0; j < GetNAddresses(i); j++)
         {
             iaddr = GetAddress(i, j);
-            if (iaddr.IsSecondary())
-            {
-                continue;
-            }
             if (iaddr.GetScope() != Ipv4InterfaceAddress::LINK && iaddr.GetScope() <= scope)
             {
                 return iaddr.GetLocal();
@@ -1410,7 +1420,8 @@ Ipv4L3Protocol::RouteInputError(Ptr<const Packet> p,
                                                              << sockErrno);
     m_dropTrace(ipHeader, p, DROP_ROUTE_ERROR, this, 0);
 
-    // \todo Send an ICMP no route.
+    // Return an ICMP net-unreachable to the source on a routing failure (see @issueid{825}).
+    SendIcmpNoRoute(ipHeader, p);
 }
 
 void

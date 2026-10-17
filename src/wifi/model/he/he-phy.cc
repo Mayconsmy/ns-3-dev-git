@@ -321,8 +321,8 @@ Time
 HePhy::GetSymbolDuration(const WifiTxVector& txVector) const
 {
     const auto guardInterval = txVector.GetGuardInterval();
-    [[maybe_unused]] const auto gi = guardInterval.GetNanoSeconds();
-    NS_ASSERT(gi == 800 || gi == 1600 || gi == 3200);
+    NS_ASSERT_MSG(IsValidGuardInterval(guardInterval, WIFI_STANDARD_80211ax),
+                  "Invalid HE guard interval " << guardInterval.As(Time::NS));
     return GetSymbolDuration(guardInterval);
 }
 
@@ -756,7 +756,7 @@ HePhy::IsConfigSupported(Ptr<const WifiPpdu> ppdu) const
     if (txVector.IsDlMu())
     {
         NS_ASSERT(txVector.GetModulationClass() >= WIFI_MOD_CLASS_HE);
-        for (auto info : txVector.GetHeMuUserInfoMap())
+        for (const auto& info : txVector.GetHeMuUserInfoMap())
         {
             if (info.first == staId)
             {
@@ -1127,9 +1127,13 @@ HePhy::SwitchMaybeToCcaBusy(const Ptr<const WifiPpdu> ppdu /* = nullptr */)
 
     if (ccaIndication.has_value())
     {
-        NS_LOG_DEBUG("CCA busy for " << ccaIndication.value().second << " during "
-                                     << ccaIndication.value().first.As(Time::S));
+        NS_LOG_DEBUG("CCA indication for " << ccaIndication.value().second << " during "
+                                           << ccaIndication.value().first.As(Time::US));
         NotifyCcaBusy(ccaIndication.value().first, ccaIndication.value().second, per20MHzDurations);
+        if (m_wifiPhy->IsStateCcaBusy())
+        {
+            NS_LOG_DEBUG("CCA busy for " << m_state->GetDelayUntilIdle().As(Time::US));
+        }
         return;
     }
 
@@ -1157,8 +1161,12 @@ HePhy::SwitchMaybeToCcaBusy(const Ptr<const WifiPpdu> ppdu /* = nullptr */)
 
     if (m_wifiPhy->IsStateCcaBusy())
     {
-        NS_LOG_DEBUG("Update CCA indication to IDLE");
+        NS_LOG_DEBUG("Update CCA indication");
         m_state->SwitchMaybeToCcaBusy(Seconds(0), WIFI_CHANLIST_PRIMARY, per20MHzDurations);
+        if (m_wifiPhy->IsStateIdle())
+        {
+            NS_LOG_DEBUG("CCA indication updated to IDLE");
+        }
     }
 }
 
@@ -1700,8 +1708,8 @@ HePhy::GetDataRateFromTxVector(const WifiTxVector& txVector, uint16_t staId /* =
 uint64_t
 HePhy::GetDataRate(uint8_t mcsValue, MHz_u channelWidth, Time guardInterval, uint8_t nss)
 {
-    [[maybe_unused]] const auto gi = guardInterval.GetNanoSeconds();
-    NS_ASSERT((gi == 800) || (gi == 1600) || (gi == 3200));
+    NS_ASSERT_MSG(IsValidGuardInterval(guardInterval, WIFI_STANDARD_80211ax),
+                  "Invalid HE guard interval " << guardInterval.As(Time::NS));
     NS_ASSERT(nss <= 8);
     return HtPhy::CalculateDataRate(GetSymbolDuration(guardInterval),
                                     GetUsableSubcarriers(channelWidth),

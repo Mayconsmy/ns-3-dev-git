@@ -10,7 +10,7 @@
 #define NS_LOG_APPEND_CONTEXT                                                                      \
     if (m_node)                                                                                    \
     {                                                                                              \
-        std::clog << " [node " << m_node->GetId() << "] ";                                         \
+        ns3LogStream << " [node " << m_node->GetId() << "] ";                                      \
     }
 
 #include "tcp-socket-base.h"
@@ -976,7 +976,32 @@ TcpSocketBase::Recv(uint32_t maxSize, uint32_t flags)
     {
         return Create<Packet>(); // Send EOF on connection close
     }
+    uint32_t oldWin = AdvertisedWindowSize();
     Ptr<Packet> outPacket = m_tcb->m_rxBuffer->Extract(maxSize);
+    uint32_t newWin = AdvertisedWindowSize();
+
+    // If the receive window had (nearly) closed, the application read just
+    // reopened it. Proactively advertise the larger window with an ACK instead
+    // of waiting for the sender's persist (zero-window) timer to probe. This
+    // mirrors SetRcvBufSize() and follows the receiver SWS-avoidance rule of
+    // @RFC{1122} sec 4.2.3.3: only advertise once the window grows by at least one
+    // full-sized segment (or half the buffer), and only from a (near) closed
+    // state, to avoid sending a redundant ACK on every read (see @issueid{125}).
+    if (m_connected && (m_state == ESTABLISHED || m_state == FIN_WAIT_1 || m_state == FIN_WAIT_2) &&
+        oldWin < m_tcb->m_segmentSize && newWin > oldWin &&
+        newWin >= std::min(m_tcb->m_segmentSize, GetRcvBufSize() / 2))
+    {
+        if (m_tcb->m_ecnState == TcpSocketState::ECN_CE_RCVD ||
+            m_tcb->m_ecnState == TcpSocketState::ECN_SENDING_ECE)
+        {
+            SendEmptyPacket(TcpHeader::ACK | TcpHeader::ECE);
+            m_tcb->m_ecnState = TcpSocketState::ECN_SENDING_ECE;
+        }
+        else
+        {
+            SendEmptyPacket(TcpHeader::ACK);
+        }
+    }
     return outPacket;
 }
 
@@ -1311,7 +1336,8 @@ TcpSocketBase::ForwardUp6(Ptr<Packet> packet,
         m_tcb->m_ecnState = TcpSocketState::ECN_CE_RCVD;
         m_congestionControl->CwndEvent(m_tcb, TcpSocketState::CA_EVENT_ECN_IS_CE);
     }
-    else if (header.GetEcn() != Ipv6Header::ECN_NotECT)
+    else if (header.GetEcn() != Ipv6Header::ECN_NotECT &&
+             m_tcb->m_ecnState != TcpSocketState::ECN_DISABLED)
     {
         m_congestionControl->CwndEvent(m_tcb, TcpSocketState::CA_EVENT_ECN_NO_CE);
     }
@@ -1432,6 +1458,10 @@ TcpSocketBase::DoForwardUp(Ptr<Packet> packet, const Address& fromAddress, const
             m_sackEnabled = false;
             m_txBuffer->SetSackEnabled(false);
         }
+        // Mirror the negotiated SACK state into the shared TcpSocketState so that
+        // recovery algorithms (e.g. PRR) can distinguish SACK from non-SACK
+        // DeliveredData accounting.
+        m_tcb->m_sackEnabled = m_sackEnabled;
 
         // When receiving a <SYN> or <SYN-ACK> we should adapt TS to the other end
         if (tcpHeader.HasOption(TcpOption::TS) && m_timestampEnabled)
@@ -1693,6 +1723,7 @@ TcpSocketBase::EnterCwr(uint32_t currentDelivered)
     m_tcb->m_cWndInfl = m_tcb->m_ssThresh;
     NS_ASSERT(m_tcb->m_congState != TcpSocketState::CA_CWR);
     NS_LOG_DEBUG(TcpSocketState::TcpCongStateName[m_tcb->m_congState] << " -> CA_CWR");
+    m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_CWR);
     m_tcb->m_congState = TcpSocketState::CA_CWR;
     // CWR state will be exited when the ack exceeds the m_recover variable.
     // Do not set m_recoverActive (which applies to a loss-based recovery)
@@ -1701,7 +1732,11 @@ TcpSocketBase::EnterCwr(uint32_t currentDelivered)
     if (!m_congestionControl->HasCongControl())
     {
         // If there is a recovery algorithm, invoke it.
-        m_recoveryOps->EnterRecovery(m_tcb, m_dupAckCount, UnAckDataCount(), currentDelivered);
+        m_recoveryOps->EnterRecovery(m_tcb,
+                                     m_dupAckCount,
+                                     UnAckDataCount(),
+                                     currentDelivered,
+                                     m_txBuffer->GetSacked());
         NS_LOG_INFO("Enter CWR recovery mode; set cwnd to " << m_tcb->m_cWnd << ", ssthresh to "
                                                             << m_tcb->m_ssThresh << ", recover to "
                                                             << m_recover);
@@ -1715,6 +1750,11 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
     NS_ASSERT(m_tcb->m_congState != TcpSocketState::CA_RECOVERY);
 
     NS_LOG_DEBUG(TcpSocketState::TcpCongStateName[m_tcb->m_congState] << " -> CA_RECOVERY");
+
+    NS_LOG_INFO("Enter CA_RECOVERY from "
+                << TcpSocketState::TcpCongStateName[m_tcb->m_congState] << ": recovering highRxAck "
+                << m_highRxAckMark << "; prior recover " << m_recover << " (active "
+                << m_recoverActive << "), new recover " << m_tcb->m_highTxMark);
 
     if (!m_sackEnabled)
     {
@@ -1751,7 +1791,11 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
 
     if (!m_congestionControl->HasCongControl())
     {
-        m_recoveryOps->EnterRecovery(m_tcb, m_dupAckCount, UnAckDataCount(), currentDelivered);
+        m_recoveryOps->EnterRecovery(m_tcb,
+                                     m_dupAckCount,
+                                     UnAckDataCount(),
+                                     currentDelivered,
+                                     m_txBuffer->GetSacked());
         NS_LOG_INFO(m_dupAckCount << " dupack. Enter fast recovery mode."
                                   << "Reset cwnd to " << m_tcb->m_cWnd << ", ssthresh to "
                                   << m_tcb->m_ssThresh << " at fast recovery seqnum " << m_recover
@@ -1936,6 +1980,24 @@ TcpSocketBase::ReceivedAck(Ptr<Packet> packet, const TcpHeader& tcpHeader)
 
     m_txBuffer->DiscardUpTo(ackNumber, MakeCallback(&TcpRateOps::SkbDelivered, m_rateOps));
 
+    // Without SACK, the guessed SACKs only have meaning during fast recovery
+    if (!m_sackEnabled && ackNumber > oldHeadSequence)
+    {
+        if (m_tcb->m_congState == TcpSocketState::CA_RECOVERY && ackNumber < m_recover)
+        {
+            // Partial ACK: the next segment is presumed lost (RFC 6582)
+            // and will be retransmitted
+            NS_LOG_INFO("Partial ACK. Manually setting head as lost");
+            m_txBuffer->MarkHeadAsLost();
+        }
+        else
+        {
+            // A cumulative ACK that advances outside of fast recovery,
+            // or that ends it, clears the guesses
+            m_txBuffer->ResetRenoSack();
+        }
+    }
+
     auto currentDelivered =
         static_cast<uint32_t>(m_rateOps->GetConnectionRate().m_delivered - previousDelivered);
     m_tcb->m_lastAckedSackedBytes = currentDelivered;
@@ -1945,6 +2007,7 @@ TcpSocketBase::ReceivedAck(Ptr<Packet> packet, const TcpHeader& tcpHeader)
         // Recovery is over after the window exceeds m_recover
         // (although it may be re-entered below if ECE is still set)
         NS_LOG_DEBUG(TcpSocketState::TcpCongStateName[m_tcb->m_congState] << " -> CA_OPEN");
+        m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
         m_tcb->m_congState = TcpSocketState::CA_OPEN;
         if (!m_congestionControl->HasCongControl())
         {
@@ -2141,13 +2204,6 @@ TcpSocketBase::ProcessAck(const SequenceNumber32& ackNumber,
         // the CA_RECOVERY phase. Just process this partial ack (RFC 5681)
         if (ackNumber < m_recover && m_tcb->m_congState == TcpSocketState::CA_RECOVERY)
         {
-            if (!m_sackEnabled)
-            {
-                // Manually set the head as lost, it will be retransmitted.
-                NS_LOG_INFO("Partial ACK. Manually setting head as lost");
-                m_txBuffer->MarkHeadAsLost();
-            }
-
             // Before retransmitting the packet perform DoRecovery and check if
             // there is available window
             if (!m_congestionControl->HasCongControl() && segsAcked >= 1)
@@ -2306,6 +2362,10 @@ TcpSocketBase::ProcessAck(const SequenceNumber32& ackNumber,
                 NewAck(ackNumber, true);
                 m_tcb->m_cWnd = m_tcb->m_ssThresh.Get();
                 m_recoveryOps->ExitRecovery(m_tcb);
+                NS_LOG_INFO("Exit CA_RECOVERY -> CA_OPEN: ack "
+                            << ackNumber << " reached recover " << m_recover << "; cWnd "
+                            << m_tcb->m_cWnd << " ssThresh " << m_tcb->m_ssThresh
+                            << " bytesInFlight " << BytesInFlight());
                 NS_LOG_DEBUG("Leaving Fast Recovery; BytesInFlight() = "
                              << BytesInFlight() << "; cWnd = " << m_tcb->m_cWnd);
             }
@@ -4119,19 +4179,36 @@ TcpSocketBase::LastAckTimeout()
     }
 }
 
-// Send 1-byte data to probe for the window size at the receiver when
-// the local knowledge tells that the receiver has zero window size
-// C.f.: RFC793 p.42, RFC1112 sec.4.2.2.17
+// Send 1-byte data (or a zero-length segment, if there is no unsent data) to
+// probe for the window size at the receiver when the local knowledge tells
+// that the receiver has zero window size
+// C.f.: RFC793 p.42, RFC1122 sec.4.2.2.17, RFC9293 sec.3.8.6.1
 void
 TcpSocketBase::PersistTimeout()
 {
     NS_LOG_LOGIC("PersistTimeout expired at " << Simulator::Now().GetSeconds());
     m_persistTimeout =
         std::min(Seconds(60), Time(2 * m_persistTimeout)); // max persist timeout = 60s
-    Ptr<Packet> p = m_txBuffer->CopyFromSequence(1, m_tcb->m_nextTxSequence)->GetPacketCopy();
-    m_txBuffer->ResetLastSegmentSent();
+    // CopyFromSequence() returns nullptr when there is no unsent data. In that
+    // case, send a zero-length probe with an already acknowledged sequence
+    // number. The receiver finds it unacceptable and must answer with an ACK
+    // carrying its current window (@RFC{9293} sec 3.10.7.4, @issueid{1326}).
+    Ptr<Packet> p;
+    SequenceNumber32 probeSeq = m_tcb->m_nextTxSequence;
+    TcpTxItem* outItem = m_txBuffer->CopyFromSequence(1, m_tcb->m_nextTxSequence);
+    if (outItem != nullptr)
+    {
+        p = outItem->GetPacketCopy();
+        // The probe byte is not accounted as sent; return it to the unsent data
+        m_txBuffer->ResetLastSegmentSent();
+    }
+    else
+    {
+        p = Create<Packet>();
+        probeSeq = m_txBuffer->HeadSequence() - 1;
+    }
     TcpHeader tcpHeader;
-    tcpHeader.SetSequenceNumber(m_tcb->m_nextTxSequence);
+    tcpHeader.SetSequenceNumber(probeSeq);
     tcpHeader.SetAckNumber(m_tcb->m_rxBuffer->NextRxSequence());
     tcpHeader.SetWindowSize(AdvertisedWindowSize());
     if (m_endPoint != nullptr)

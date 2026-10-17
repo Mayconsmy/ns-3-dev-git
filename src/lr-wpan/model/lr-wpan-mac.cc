@@ -28,7 +28,7 @@
 
 #undef NS_LOG_APPEND_CONTEXT
 #define NS_LOG_APPEND_CONTEXT                                                                      \
-    std::clog << "[" << m_shortAddress << " | " << m_macExtendedAddress << "] ";
+    ns3LogStream << "[" << m_shortAddress << " | " << m_macExtendedAddress << "] ";
 
 namespace ns3
 {
@@ -966,6 +966,12 @@ LrWpanMac::MlmeSetRequest(MacPibAttributeIdentifier id, Ptr<MacPibAttributes> at
         m_phy->PlmeSetAttributeRequest(PhyPibAttributeIdentifier::phyCurrentPage, pibAttr);
         break;
     }
+    case macCoordExtendedAddress:
+        m_macCoordExtendedAddress = attribute->macCoordExtendedAddress;
+        break;
+    case macCoordShortAddress:
+        m_macCoordShortAddress = attribute->macCoordShortAddress;
+        break;
     default:
         // TODO: Add support for setting other attributes
         confirmParams.m_status = MacStatus::UNSUPPORTED_ATTRIBUTE;
@@ -2419,15 +2425,6 @@ LrWpanMac::PdDataIndication(uint32_t psduLength, Ptr<Packet> p, uint8_t lqi, int
     LrWpanMacTrailer receivedMacTrailer;
     p->RemoveTrailer(receivedMacTrailer);
 
-    // Extract the MAC Header from the packet
-    LrWpanMacHeader receivedMacHdr;
-    p->RemoveHeader(receivedMacHdr);
-
-    if (Node::ChecksumEnabled())
-    {
-        receivedMacTrailer.EnableFcs(true);
-    }
-
     // From section 7.5.6.2 Reception and rejection, IEEE 802.15.4-2006
     // - Level 1 filtering: Test FCS field and reject if frame fails.
     // - Level 2 filtering: If promiscuous mode pass frame to higher layer
@@ -2438,12 +2435,20 @@ LrWpanMac::PdDataIndication(uint32_t psduLength, Ptr<Packet> p, uint8_t lqi, int
     //   srcPanId = m_macPanId if only srcAddr field in Data or Command frame,accept frame if
     //   srcPanId=m_macPanId.
 
-    // Level 1 filtering
-    if (!receivedMacTrailer.CheckFcs(p))
+    // Level 1 filtering (Only available if ns-3 included the FCS)
+    if (Node::ChecksumEnabled())
     {
-        m_macRxDropTrace(originalPkt);
-        return;
+        if (!receivedMacTrailer.CheckFcs(p))
+        {
+            m_macRxDropTrace(originalPkt);
+            return;
+        }
     }
+
+    // After the FCS check, we can now
+    // extract the MAC Header from the packet
+    LrWpanMacHeader receivedMacHdr;
+    p->RemoveHeader(receivedMacHdr);
 
     // Level 2 filtering
     if (m_macPromiscuousMode)
@@ -3346,7 +3351,7 @@ LrWpanMac::PdDataConfirm(PhyEnumeration status)
                 }
                 else if (receivedMacPayload.GetCommandFrameType() == CommandPayloadHeader::DATA_REQ)
                 {
-                    // We enqueue the the Assoc Response command frame in the Tx queue
+                    // We enqueue the Assoc Response command frame in the Tx queue
                     // and the packet is transmitted as soon as the PHY is free and the IFS have
                     // taken place.
                     SendAssocResponseCommand(m_rxPkt->Copy());

@@ -13,6 +13,7 @@
 
 #include "ns3/header.h"
 #include "ns3/mac48-address.h"
+#include "ns3/wifi-export.h"
 
 namespace ns3
 {
@@ -83,7 +84,7 @@ enum WifiMacType
  *
  * Implements the IEEE 802.11 MAC header
  */
-class WifiMacHeader : public Header
+class WIFI_EXPORT WifiMacHeader : public Header
 {
   public:
     /**
@@ -234,6 +235,12 @@ class WifiMacHeader : public Header
      * Un-set the Power Management bit in the Frame Control field.
      */
     void SetNoPowerManagement();
+    /**
+     * Set the More Data bit in the Frame Control field.
+     *
+     * @param flag true to set the bit to 1, false to set the bit to 0
+     */
+    void SetMoreData(bool flag);
     /**
      * Set the TID for the QoS header.
      *
